@@ -13,6 +13,7 @@ const S = {
   f: { q: '', scope: 'open', goal: '', obj: '' },
   editing: null, form: null,
   easy: { max: 2, q: '', open: new Set() },
+  ideas: { q: '', pinned: false, color: 'sand' }, ideaForm: null, ptab: 'obj',
   plan: { cat: null }
 };
 const REQUIRED = ['Main goal', 'Category', 'Objective', 'Due date', 'Est hours', 'Priority', 'Energy'];
@@ -190,10 +191,16 @@ function viewHome() {
   const dow = (new Date(td + 'T12:00:00').getDay() + 6) % 7;
   const mon = addDays(td, -dow);
   const days = [...Array(7)].map((_, i) => addDays(mon, i));
-  const counts = days.map(d => S.data.tasks.filter(t => isDone(t) && d10(t['Completed on']) === d).length);
-  const max = Math.max(3, ...counts);
+  // Daily %: done that day ÷ (done that day + tasks due that day not finished on time). Today = the ring.
+  const pcts = days.map(d => {
+    if (d > td) return null;
+    if (d === td) return total ? pct : null;
+    const done = S.data.tasks.filter(t => isDone(t) && d10(t['Completed on']) === d).length;
+    const missed = S.data.tasks.filter(t => d10(t['Due date']) === d && !(isDone(t) && d10(t['Completed on']) <= d)).length;
+    return done + missed ? Math.round(100 * done / (done + missed)) : null;
+  });
   const week = days.map((d, i) => `<div class="day ${d === td ? 'today' : ''} ${d > td ? 'future' : ''}">
-      <div class="num">${counts[i] || ''}</div><div class="bar"><span style="height:${counts[i] / max * 100}%"></span></div>
+      <div class="num">${pcts[i] === null ? '' : pcts[i] + '%'}</div><div class="bar"><span style="height:${pcts[i] || 0}%"></span></div>
       <div class="lbl">${new Date(d + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'narrow' })}</div></div>`).join('');
 
   return `<section class="reef">
@@ -210,7 +217,8 @@ function viewHome() {
       </div>
       ${REEF_ART}
     </section>
-    <div class="card week" aria-label="Tasks completed this week">${week}</div>
+    <div class="card week-card" aria-label="Daily completion this week"><div class="week">${week}</div>
+      <div class="week-note">Daily % = tasks done ÷ tasks planned or due that day</div></div>
 
     <div class="sec-h"><h2>Today <span class="n">${B.planned.length}</span></h2><button class="link" data-act="plan">Plan my day</button></div>
     ${B.planned.length ? list(B.planned) : `<div class="empty">Nothing planned yet.<br><button class="btn primary" data-act="plan">Plan my day</button></div>`}
@@ -248,27 +256,31 @@ function viewTasks() {
    ===================================================================== */
 function stat(ts) { const d = ts.filter(isDone).length; return { d, n: ts.length, p: ts.length ? Math.round(100 * d / ts.length) : 0, h: ts.filter(t => !isDone(t)).reduce((s, t) => s + hrs(t), 0) }; }
 function viewProjects() {
-  const D = S.data, goals = D.goals.map(g => g.Name);
-  D.tasks.forEach(t => { if (t['Main goal'] && !goals.includes(t['Main goal'])) goals.push(t['Main goal']); });
-  const html = goals.map(g => {
-    const gt = D.tasks.filter(t => t['Main goal'] === g), gs = stat(gt), h = hue(g);
-    const cats = D.categories.filter(c => c['Main goal'] === g).map(c => c.Name);
-    gt.forEach(t => { if (t.Category && !cats.includes(t.Category)) cats.push(t.Category); });
-    const catHTML = cats.map(c => {
-      const ct = gt.filter(t => t.Category === c), cs = stat(ct);
-      const objs = D.objectives.filter(o => o.Category === c).map(o => o.Name);
-      ct.forEach(t => { if (t.Objective && !objs.includes(t.Objective)) objs.push(t.Objective); });
-      const rows = objs.map(o => { const s = stat(ct.filter(t => t.Objective === o)); return { s, html:
-        `<div class="obj ${s.n && s.d === s.n ? 'complete' : ''}" data-act="fobj" data-v="${esc(o)}"><span class="on">${esc(o)}</span><div class="pbar"><span style="width:${s.p}%"></span></div><span class="c">${s.d}/${s.n}</span></div>` }; });
-      const active = rows.filter(r => !(r.s.n && r.s.d === r.s.n)), closed = rows.filter(r => r.s.n && r.s.d === r.s.n);
-      return `<div class="cat-b"><div class="ch"><span>${esc(c)}</span><small>${cs.h ? cs.h.toFixed(1) + ' h left' : ''}</small></div>
-        ${active.map(r => r.html).join('') || '<div class="note">All objectives done.</div>'}
-        ${closed.length ? `<details class="closed"><summary>${closed.length} finished</summary>${closed.map(r => r.html).join('')}</details>` : ''}</div>`;
-    }).join('');
-    return `<section class="card goal" style="--h:${h}"><div class="goal-h"><span class="name">${esc(g)}</span><span class="pct">${gs.p}%</span></div>
-      <div class="pbar"><span style="width:${gs.p}%"></span></div><div class="note" style="margin:8px 0 0">${gs.d} of ${gs.n} tasks · ${gs.h.toFixed(1)} h left</div>${catHTML}</section>`;
-  }).join('');
-  return `${pageTop('Projects')}${html || '<div class="empty">No goals yet.</div>'}`;
+  const D = S.data, tab = S.ptab || 'obj';
+  const row = (name, ts, h, act) => { const s = stat(ts);
+    return { s, html: `<div class="prow ${act ? 'tap' : ''}" style="--h:${h}" ${act ? `data-act="fobj" data-v="${esc(name)}"` : ''}>
+      <div class="pr-top"><span class="pr-name">${esc(name)}</span><span class="pr-pct">${s.p}%</span></div>
+      <div class="pbar"><span style="width:${s.p}%"></span></div></div>` }; };
+  let rows = [];
+  if (tab === 'goal') {
+    const goals = D.goals.map(g => g.Name); D.tasks.forEach(t => { if (t['Main goal'] && !goals.includes(t['Main goal'])) goals.push(t['Main goal']); });
+    rows = goals.map(g => row(g, D.tasks.filter(t => t['Main goal'] === g), hue(g)));
+  } else if (tab === 'cat') {
+    rows = catOrder().map(c => row(c.name, D.tasks.filter(t => t.Category === c.name), hue(c.goal)));
+  } else {
+    const objs = []; catOrder().forEach(c => {
+      D.objectives.filter(o => o.Category === c.name).forEach(o => objs.push({ n: o.Name, g: c.goal }));
+      D.tasks.filter(t => t.Category === c.name && t.Objective && !objs.some(x => x.n === t.Objective)).forEach(t => objs.push({ n: t.Objective, g: c.goal }));
+    });
+    rows = objs.map(o => row(o.n, D.tasks.filter(t => t.Objective === o.n), hue(o.g), true));
+  }
+  rows = rows.filter(r => r.s.n);   // hide empty items
+  const active = rows.filter(r => r.s.p < 100), done = rows.filter(r => r.s.p === 100);
+  const tabBtn = (k, l) => `<button type="button" data-act="ptab" data-v="${k}" aria-pressed="${tab === k}">${l}</button>`;
+  return `${pageTop('Projects')}
+    <div class="seg ptabs">${tabBtn('obj', 'Objectives')}${tabBtn('cat', 'Categories')}${tabBtn('goal', 'Goals')}</div>
+    ${active.length ? `<div class="card plist">${active.map(r => r.html).join('')}</div>` : '<div class="empty">Nothing in progress here.</div>'}
+    ${done.length ? `<details class="done-list"><summary>Completed (${done.length})</summary><div class="card plist">${done.map(r => r.html).join('')}</div></details>` : ''}`;
 }
 
 /* =====================================================================
@@ -305,6 +317,102 @@ function viewEasy() {
     ${unrated ? `<p class="note">${unrated} open task${unrated > 1 ? 's have' : ' has'} no energy rating and ${unrated > 1 ? 'are' : 'is'} not shown.</p>` : ''}`;
 }
 
+
+/* =====================================================================
+   Ideas (brainstorming)
+   ===================================================================== */
+const IDEA_COLORS = ['sand', 'coral', 'lagoon', 'anemone', 'seagrass'];
+function swatches(cur, act) {
+  return `<div class="swatches">${IDEA_COLORS.map(c => `<button type="button" class="sw c-${c}" data-act="${act}" data-v="${c}" aria-pressed="${c === cur}" aria-label="${c}"></button>`).join('')}</div>`;
+}
+function ideaParts(text) { const lines = String(text || '').split('\n'); return { title: lines[0].trim(), rest: lines.slice(1).join('\n').trim() }; }
+function viewIdeas() {
+  const I = S.ideas, q = norm(I.q);
+  const all = (S.data.ideas || []).slice().sort((a, b) => (isTrue(b.Pinned) - isTrue(a.Pinned)) || String(b.Updated || '').localeCompare(String(a.Updated || '')));
+  const shown = all.filter(x => (!I.pinned || isTrue(x.Pinned)) && (!q || norm(x.Text + ' ' + (x.Goal || '')).includes(q)));
+  const notes = shown.map(x => { const p = ideaParts(x.Text);
+    return `<article class="idea c-${esc(x.Color || 'sand')}" data-iid="${esc(x.ID)}">
+      <button class="pin ${isTrue(x.Pinned) ? 'on' : ''}" data-act="idea-pin" aria-label="Pin">📌</button>
+      <div class="idea-b" data-act="idea-open"><div class="it">${esc(p.title)}</div>${p.rest ? `<div class="ir">${esc(p.rest)}</div>` : ''}</div>
+      <div class="idea-f"><span>${x.Goal ? esc(x.Goal) + ' · ' : ''}${niceDate(x.Updated || x.Created)}</span><button class="totask" data-act="idea-task">→ Task</button></div></article>`; }).join('');
+  return `${pageTop('Ideas')}
+    <p class="psub">Catch ideas as they come. Turn the good ones into tasks.</p>
+    <div class="card capture"><textarea id="ideaNew" rows="3" placeholder="What's on your mind? First line = title"></textarea>
+      <div class="cap-row">${swatches(I.color, 'idea-color')}
+        <select id="ideaGoal" aria-label="Goal (optional)"><option value="">No goal</option>${S.data.goals.map(g => `<option>${esc(g.Name)}</option>`).join('')}</select>
+        <button class="btn primary small" data-act="idea-add">Add</button></div></div>
+    <div class="toolbar"><input class="search" type="search" placeholder="Search ideas" value="${esc(I.q)}" data-f="ideaq" aria-label="Search ideas">
+      <div class="chips"><button class="chip" data-act="idea-filter" aria-pressed="${!I.pinned}">All (${all.length})</button>
+        <button class="chip" data-act="idea-filter" data-v="pinned" aria-pressed="${I.pinned}">📌 Pinned</button></div></div>
+    ${shown.length ? `<div class="ideas">${notes}</div>` : `<div class="empty">${all.length ? 'No idea matches.' : 'No ideas yet. Write the first one above.'}</div>`}`;
+}
+function openIdea(x) {
+  S.ideaForm = { ID: x.ID, color: x.Color || 'sand' };
+  openSheet('Idea', `<form id="idf" onsubmit="return false">
+    <label class="field"><span class="lab">Idea</span><textarea name="Text" rows="9">${esc(x.Text)}</textarea></label>
+    <div class="field"><span class="lab">Colour</span>${swatches(S.ideaForm.color, 'idf-color')}</div>
+    <label class="field"><span class="lab">Goal</span><select name="Goal"><option value="">No goal</option>${S.data.goals.map(g => `<option ${g.Name === x.Goal ? 'selected' : ''}>${esc(g.Name)}</option>`).join('')}</select></label>
+    <label class="switch"><span>📌 Pinned</span><input type="checkbox" name="Pinned" ${isTrue(x.Pinned) ? 'checked' : ''}></label>
+    <button type="button" class="btn primary block" data-act="idea-task" data-iid="${esc(x.ID)}" style="margin:8px 0 10px">→ Make it a task</button>
+    <button type="button" class="btn danger block" data-act="idea-del">Delete idea</button></form>`, saveIdeaSheet);
+}
+async function apiIdea(action, payload, msg) {
+  syncing(true, 'Saving…');
+  try { const r = await api(action, payload); setData(r.data); render(); if (msg) toast(msg); }
+  catch (e) { toast('Not saved: ' + e.message); refresh(false); } finally { syncing(false); }
+}
+function saveIdeaSheet() {
+  const f = $('#idf'), text = f.Text.value.trim(); if (!text) return toast('The idea is empty');
+  const idea = { ID: S.ideaForm.ID, Text: text, Color: S.ideaForm.color, Goal: f.Goal.value, Pinned: f.Pinned.checked };
+  const x = S.data.ideas.find(i => i.ID === idea.ID); if (x) Object.assign(x, idea, { Updated: new Date().toISOString().slice(0, 19) });
+  closeSheet(); render(); apiIdea('saveIdea', { idea }, 'Idea saved');
+}
+function ideaToTask(x, fromSheet) {
+  const p = ideaParts(x.Text);
+  if (fromSheet) hideSheet();            // keep its history step; the task form adds the next one
+  openEditor(null, { Task: p.title, Notes: p.rest, Goal: x.Goal || '' });
+}
+
+/* =====================================================================
+   Reset tools (Me > Advanced)
+   ===================================================================== */
+const RESET = {
+  objective: { list: () => S.data.objectives.map(o => o.Name), title: 'Reset an objective', what: 'Removes <b>all tasks</b> of this objective. The objective itself is kept.' },
+  category:  { list: () => S.data.categories.map(c => c.Name), title: 'Reset a category', what: 'Removes <b>all objectives and their tasks</b> in this category. The category itself is kept.' },
+  goal:      { list: () => S.data.goals.map(g => g.Name), title: 'Reset a goal', what: 'Removes <b>all categories, objectives and tasks</b> of this goal. The goal itself is kept.' }
+};
+function openReset(kind) {
+  if (kind === 'all') {
+    openSheet('Reset everything', `<p>Removes <b>all your tasks, objectives and categories</b>. Ideas are kept. This cannot be undone.</p>
+      <label class="switch"><span>Also remove my goals</span><input type="checkbox" id="rsGoals"></label>
+      <label class="field"><span class="lab">Type RESET to confirm</span><input id="rsWord" autocomplete="off"></label>
+      <button class="btn danger-fill block" data-act="reset-go" data-v="all">Reset everything</button>`, null);
+    return;
+  }
+  const R = RESET[kind], items = R.list();
+  openSheet(R.title, `<p>${R.what}</p>
+    <label class="field"><span class="lab">Choose</span><select id="rsItem">${items.map(n => `<option>${esc(n)}</option>`).join('')}</select></label>
+    <p class="note" id="rsPrev" style="color:var(--warn)"></p>
+    <button class="btn danger-fill block" data-act="reset-go" data-v="${kind}" ${items.length ? '' : 'disabled'}>Reset</button>`, null);
+  const sel = $('#rsItem'); if (!sel) return;
+  const prev = () => { $('#rsPrev').textContent = 'Will remove: …';
+    api('resetPreview', { kind, name: sel.value }).then(r => { $('#rsPrev').textContent = 'Will remove: ' + r.text; }).catch(() => { $('#rsPrev').textContent = ''; }); };
+  sel.onchange = prev; if (items.length) prev();
+}
+async function doReset(kind, btn) {
+  let payload;
+  if (kind === 'all') {
+    if ($('#rsWord').value.trim() !== 'RESET') return toast('Type RESET to confirm');
+    payload = ['resetAll', { alsoGoals: $('#rsGoals').checked }];
+  } else {
+    const name = $('#rsItem').value; if (!confirm('Reset "' + name + '"? This cannot be undone.')) return;
+    payload = ['reset', { kind, name }];
+  }
+  btn.disabled = true; syncing(true, 'Resetting…');
+  try { const r = await api(payload[0], payload[1]); setData(r.data); closeSheet(); render(); toast(r.text || 'Done'); }
+  catch (e) { toast('Not reset: ' + e.message); btn.disabled = false; } finally { syncing(false); }
+}
+
 /* =====================================================================
    Me
    ===================================================================== */
@@ -322,6 +430,15 @@ function viewMe() {
       <button data-act="logout" style="color:var(--danger)">Log out</button>
     </div>
     ${DEMO ? '<p class="note">Demo mode: changes are not saved. Add your Apps Script URL in config.js.</p>' : ''}
+    <details class="advanced"><summary>Advanced</summary>
+      <div class="card menu">
+        <button data-act="reset-open" data-v="objective">Reset the tasks of an objective <small>›</small></button>
+        <button data-act="reset-open" data-v="category">Reset the objectives of a category <small>›</small></button>
+        <button data-act="reset-open" data-v="goal">Reset the categories of a goal <small>›</small></button>
+        <button data-act="reset-open" data-v="all" style="color:var(--danger)">Reset everything <small>›</small></button>
+      </div>
+      <p class="note">Resetting deletes tasks for good and removes them from Google Tasks / Reclaim. The item you reset is kept, so you don't need to re-enter it.</p>
+    </details>
     ${isAdmin() ? '' : '<p class="note">Your tasks are private to your account. Reclaim scheduling is only available to the owner.</p>'}`;
 }
 
@@ -331,8 +448,8 @@ function viewMe() {
 function viewLogin(msg = '') {
   $('#nav').classList.add('hidden');
   $('#app').innerHTML = `<div class="login"><form class="card" id="loginForm" autocomplete="on">
-    <img class="logo" src="icons/icon-192.png" alt="">
-    <h1>Task Tracker</h1><p>Log in to see your day.</p>
+    <img class="logo-wide" src="icons/logo.png" alt="ARO∞ logo">
+    <h1>My Steps</h1><p>Log in to see your day.</p>
     ${DEMO ? '<div class="demo">Demo mode: any email and password work. Sample data only.</div>' : ''}
     <label class="field">Email<input name="email" type="email" required autocomplete="username"></label>
     <label class="field">Password<input name="password" type="password" required autocomplete="current-password"></label>
@@ -359,7 +476,7 @@ function logout(expired) {
 /* =====================================================================
    Render & data flow
    ===================================================================== */
-const VIEWS = { home: viewHome, tasks: viewTasks, easy: viewEasy, projects: viewProjects, me: viewMe };
+const VIEWS = { home: viewHome, tasks: viewTasks, easy: viewEasy, ideas: viewIdeas, projects: viewProjects, me: viewMe };
 function render() {
   if (!S.data) { $('#app').innerHTML = '<div class="page">' + '<div class="skel"></div>'.repeat(4) + '</div>'; return; }
   const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : null;
@@ -424,9 +541,13 @@ window.addEventListener('popstate', e => {
   const st = e.state || { view: 'home', depth: 0 };
   if (!S.user || !S.data) return;
   const sheetOpen = $('#sheet').classList.contains('open');
-  if (st.sheet && sheetOpen) {          // still inside the panel (e.g. Plan step 2 -> step 1)
-    NAV.sheet = st.sheet;
-    if (st.plan !== undefined) { S.plan.cat = st.cat || null; $('#sheetBody').innerHTML = planBody(); }
+  if (st.sheet && sheetOpen && st.plan !== undefined && S.sheetKind === 'plan') {  // Plan step 2 -> step 1
+    NAV.sheet = st.sheet; S.plan.cat = st.cat || null; $('#sheetBody').innerHTML = planBody();
+    return;
+  }
+  if (st.sheet) {                       // any other panel: close it and drop the panel steps left behind
+    if (sheetOpen) hideSheet();
+    NAV.sheet = 0; history.go(-st.sheet);
     return;
   }
   if (sheetOpen) hideSheet();
@@ -440,6 +561,7 @@ function openSheet(title, body, onSave, saveLabel = 'Save', extra) {
   const sb = $('#sheetSave'); sb.textContent = saveLabel; sb.classList.toggle('hidden', !onSave); sb.onclick = onSave;
   $('#sheet').classList.add('open'); $('#scrim').classList.add('open');
   $('#sheetBody').scrollTop = 0;
+  S.sheetKind = extra && extra.plan ? 'plan' : 'other';
   pushSheet(extra);
 }
 function hideSheet() { $('#sheet').classList.remove('open'); $('#scrim').classList.remove('open'); S.editing = null; }
@@ -463,28 +585,43 @@ function inlineAdd(kind, placeholder) {
   return `<div class="inline-add hidden" data-kind="${kind}"><input placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">
     <button type="button" class="btn primary small" data-act="add-item" data-kind="${kind}">Add</button></div>`;
 }
-function openEditor(t) {
-  const D = S.data; S.editing = t || null;
-  const goal = t ? t['Main goal'] : (S.f.goal || ''), cat = t ? t.Category : '', obj = t ? t.Objective : (S.f.obj || '');
+// Last goal / category / objective used for a new task (remembered per account)
+function lastEntry() {
+  const L = store.get('tt_lastentry_' + S.user.email) || {}, D = S.data;
+  const goal = D.goals.some(g => g.Name === L.goal) ? L.goal : '';
+  const cat = goal && D.categories.some(c => c.Name === L.cat && c['Main goal'] === goal) ? L.cat : '';
+  const obj = cat && D.objectives.some(o => o.Name === L.obj && o.Category === cat) ? L.obj : '';
+  return { goal, cat, obj };
+}
+const DEFAULTS = { Priority: 'Medium', 'Est hours': 1, Energy: '3' };
+function openEditor(t, preset) {
+  const D = S.data; S.editing = t || null; preset = preset || {};
+  let goal, cat, obj;
+  if (t) { goal = t['Main goal']; cat = t.Category; obj = t.Objective; }
+  else if (S.f.obj) { obj = S.f.obj; const o = D.objectives.find(x => x.Name === obj); cat = o ? o.Category : ''; const c = D.categories.find(x => x.Name === cat); goal = c ? c['Main goal'] : ''; }
+  else ({ goal, cat, obj } = lastEntry());
+  if (!t && preset.Goal && D.goals.some(g => g.Name === preset.Goal) && preset.Goal !== goal) { goal = preset.Goal; cat = ''; obj = ''; }
   const cats = D.categories.filter(c => !goal || c['Main goal'] === goal).map(c => c.Name);
   const objs = D.objectives.filter(o => !cat || o.Category === cat).map(o => o.Name);
   const ctx = [...new Set(D.tasks.map(x => x.Context).filter(Boolean))];
   const deps = D.tasks.filter(x => !isDone(x) && (!t || x.ID !== t.ID)).map(x => String(x.Task).replace(/^[^\p{L}\p{N}]+/u, ''));
-  const v = k => esc(t ? (t[k] ?? '') : '');
-  S.form = { Energy: t ? t.Energy : '', Priority: t ? (t.Priority || '') : '' };
+  const v = k => esc(t ? (t[k] ?? '') : (preset[k] ?? DEFAULTS[k] ?? ''));
+  S.form = { Energy: t ? t.Energy : DEFAULTS.Energy, Priority: t ? (t.Priority || '') : DEFAULTS.Priority };
+  const dueVal = t ? d10(t['Due date']) : addDays(today(), 1);   // new task: due tomorrow
   const body = `<form id="ed" autocomplete="off" onsubmit="return false" novalidate>
-    <div class="fs"><div class="field req" data-name="Task"><span class="lab">Task</span><input name="Task" value="${v('Task')}" placeholder="What needs doing?">
-        ${t ? '' : '<div class="nprev" id="taskPrev"></div>'}</div>
+    <div class="fs">
       ${fieldReq('Goal', 'Main goal', selectHTML('Main goal', D.goals.map(g => g.Name), goal))}
       <button type="button" class="addlink" data-act="show-add" data-kind="goals">+ New goal</button>${inlineAdd('goals', 'New goal, e.g. 🌊 Research')}
       ${fieldReq('Category', 'Category', selectHTML('Category', cats, cat))}
       <button type="button" class="addlink" data-act="show-add" data-kind="categories">+ New category in this goal</button>${inlineAdd('categories', 'New category, e.g. 🐠 Fish survey')}
       ${fieldReq('Objective', 'Objective', selectHTML('Objective', objs, obj))}
       <button type="button" class="addlink" data-act="show-add" data-kind="objectives">+ New objective in this category</button>${inlineAdd('objectives', 'New objective, e.g. 📋 Questionnaire')}<div class="nprev hidden" id="objPrev"></div>
+      <div class="field req" data-name="Task"><span class="lab">Task</span><input name="Task" value="${v('Task')}" placeholder="What needs doing?">
+        ${t ? '' : '<div class="nprev" id="taskPrev"></div>'}</div>
 </div>
     <div class="fs"><div class="lg">When</div>
       <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && isTrue(t.Today) ? 'checked' : ''}></label>
-      <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${d10(t && t['Due date'])}">`)}
+      <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${dueVal}">`)}
       <label class="field"><span class="lab">Scheduled</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div></div>
     <div class="fs"><div class="lg">Effort</div>
       <div class="row2">${fieldReq('Hours', 'Est hours', `<input type="number" inputmode="decimal" name="Est hours" min="0" step="0.25" value="${v('Est hours')}" placeholder="e.g. 1.5">`)}
@@ -501,7 +638,7 @@ function openEditor(t) {
       <label class="field"><span class="lab">Notes</span><textarea name="Notes">${v('Notes')}</textarea></label>
       <datalist id="ctxL">${ctx.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       <datalist id="depL">${deps.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
-    <p class="note" style="margin:0 0 16px"><span style="color:var(--coral)">*</span> required for new tasks</p>
+    <p class="note" style="margin:0 0 16px"><span style="color:var(--coral)">*</span> required for new tasks · new tasks start with: due tomorrow, Medium, 1 h, energy 3</p>
     ${t ? '<button type="button" class="btn danger block" data-act="delete">Delete task</button>' : ''}
   </form>`;
   openSheet(t ? 'Edit task' : 'New task', body, saveEditor);
@@ -525,7 +662,7 @@ function openEditor(t) {
   f.addEventListener('change', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); updPrev(); });
   f.addEventListener('click', () => setTimeout(updPrev, 0));
   updPrev();
-  if (!t) setTimeout(() => f.Task.focus(), 260);
+  if (!t && !preset.Task) setTimeout(() => (obj ? f.Task : f['Main goal']).focus(), 260);
 }
 const catsOf = g => S.data.categories.filter(c => !g || c['Main goal'] === g).map(c => c.Name);
 const objsOf = c => S.data.objectives.filter(o => o.Category === c).map(o => o.Name);
@@ -579,6 +716,7 @@ async function saveEditor() {
     p['Start now'] = f.Reclaim.checked && f['Start now'].checked ? 'do now' : '';
   }
   if (!t && p.Objective) p.Task = withPrefix(lead(p.Objective), p.Task);
+  if (!t) store.set('tt_lastentry_' + S.user.email, { goal: p['Main goal'], cat: p.Category, obj: p.Objective });
   closeSheet();
   if (t) { p.ID = t.ID; await save(p, 'Saved'); }
   else {
@@ -672,6 +810,24 @@ document.addEventListener('click', async e => {
     case 'plan': openPlan(); break;
     case 'plan-cat': S.plan.cat = a.dataset.v; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; pushSheet({ plan: 1, cat: a.dataset.v }); break;
     case 'plan-back': history.back(); break;
+    case 'ptab': S.ptab = a.dataset.v; render(); break;
+    case 'idea-add': {
+      const box = $('#ideaNew'), text = box.value.trim(); if (!text) { box.focus(); return toast('Write your idea first'); }
+      const idea = { Text: text, Color: S.ideas.color, Goal: $('#ideaGoal').value, Pinned: false };
+      S.data.ideas = (S.data.ideas || []).concat([Object.assign({ ID: 'tmp' + Date.now(), Updated: new Date().toISOString().slice(0, 19) }, idea)]);
+      render(); apiIdea('saveIdea', { idea }, 'Idea added'); break;
+    }
+    case 'idea-color': S.ideas.color = a.dataset.v; a.parentElement.querySelectorAll('.sw').forEach(b => b.setAttribute('aria-pressed', b === a)); break;
+    case 'idf-color': S.ideaForm.color = a.dataset.v; a.parentElement.querySelectorAll('.sw').forEach(b => b.setAttribute('aria-pressed', b === a)); break;
+    case 'idea-filter': S.ideas.pinned = a.dataset.v === 'pinned'; render(); break;
+    case 'idea-pin': { const x = S.data.ideas.find(i => i.ID === a.closest('[data-iid]').dataset.iid); if (!x) break;
+      x.Pinned = !isTrue(x.Pinned); render(); apiIdea('saveIdea', { idea: { ID: x.ID, Text: x.Text, Pinned: x.Pinned } }); break; }
+    case 'idea-open': openIdea(S.data.ideas.find(i => i.ID === a.closest('[data-iid]').dataset.iid)); break;
+    case 'idea-task': { const id = a.dataset.iid || a.closest('[data-iid]').dataset.iid; ideaToTask(S.data.ideas.find(i => i.ID === id), !!a.closest('#sheet')); break; }
+    case 'idea-del': { if (!confirm('Delete this idea?')) return; const id = S.ideaForm.ID; S.data.ideas = S.data.ideas.filter(i => i.ID !== id);
+      closeSheet(); render(); apiIdea('deleteIdea', { id }, 'Idea deleted'); break; }
+    case 'reset-open': openReset(a.dataset.v); break;
+    case 'reset-go': doReset(a.dataset.v, a); break;
     case 'easy-max': S.easy.max = Number(a.dataset.v); render(); break;
     case 'show-add': {
       const box = $(`#ed .inline-add[data-kind="${a.dataset.kind}"]`); box.classList.toggle('hidden');
@@ -710,7 +866,7 @@ document.addEventListener('click', async e => {
 });
 document.addEventListener('input', e => {
   const k = e.target.dataset && e.target.dataset.f; if (!k) return;
-  if (k === 'easyq') S.easy.q = e.target.value; else S.f[k] = e.target.value;
+  if (k === 'easyq') S.easy.q = e.target.value; else if (k === 'ideaq') S.ideas.q = e.target.value; else S.f[k] = e.target.value;
   render();
 });
 // remember which category accordions are open on the Easy page
@@ -753,7 +909,11 @@ const Demo = (() => {
       T('a11', '🌊 Research', '🧭 Field survey', '🧭📋 Questionnaire', '🧭📋 Translate into Malagasy', 'Medium', 3, td, 1.5, 'Not Started', { Reclaim: 'YES', Today: true })
     ]
   };
-  const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, user: S.user, today: td })) });
+  db.ideas = [
+    { ID: 'i1', Text: 'Use drone photos for seagrass cover\nCompare with quadrat data from the last survey', Color: 'lagoon', Pinned: true, Goal: '🌊 Research', Updated: td + 'T08:00:00' },
+    { ID: 'i2', Text: 'Short video for the R course launch', Color: 'coral', Pinned: false, Goal: '', Updated: d(-1) + 'T17:00:00' },
+    { ID: 'i3', Text: 'Ask the fishers about seasonal catches\nMaybe add a calendar question to the survey', Color: 'sand', Pinned: false, Goal: '🌊 Research', Updated: d(-3) + 'T10:00:00' }];
+  const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, ideas: db.ideas, user: S.user, today: td })) });
   const wait = v => new Promise(r => setTimeout(() => r(v), 300));
   return {
     call(action, p) {
@@ -767,6 +927,18 @@ const Demo = (() => {
       }
       if (action === 'delete') { db.tasks = db.tasks.filter(x => x.ID !== p.id); return wait(out()); }
       if (action === 'addItem') { db[p.kind].push(p.item); return wait(out()); }
+      if (action === 'saveIdea') { let x = db.ideas.find(i => i.ID === p.idea.ID);
+        if (!x) { x = { ID: 'i' + Date.now() }; db.ideas.push(x); } Object.assign(x, p.idea, { Updated: new Date().toISOString().slice(0, 19) }); return wait(out()); }
+      if (action === 'deleteIdea') { db.ideas = db.ideas.filter(i => i.ID !== p.id); return wait(out()); }
+      if (action === 'resetPreview') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind];
+        return wait({ ok: true, text: db.tasks.filter(t => t[f] === p.name).length + ' task(s)' }); }
+      if (action === 'reset') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind];
+        const n = db.tasks.filter(t => t[f] === p.name).length; db.tasks = db.tasks.filter(t => t[f] !== p.name);
+        if (p.kind === 'category') db.objectives = db.objectives.filter(o => o.Category !== p.name);
+        if (p.kind === 'goal') { const cs = db.categories.filter(c => c['Main goal'] === p.name).map(c => c.Name); db.categories = db.categories.filter(c => !cs.includes(c.Name)); db.objectives = db.objectives.filter(o => !cs.includes(o.Category)); }
+        return wait(Object.assign(out(), { text: 'Done: removed ' + n + ' task(s). "' + p.name + '" is kept.' })); }
+      if (action === 'resetAll') { const n = db.tasks.length; db.tasks = []; db.objectives = []; db.categories = []; if (p.alsoGoals) db.goals = [];
+        return wait(Object.assign(out(), { text: n + ' task(s) removed' })); }
       return wait({ ok: true });
     }
   };

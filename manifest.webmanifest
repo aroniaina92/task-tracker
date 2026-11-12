@@ -1,7 +1,7 @@
 {
-  "name": "Task Tracker",
-  "short_name": "Tasks",
-  "description": "Daily progress and today's tasks",
+  "name": "My Steps",
+  "short_name": "My Steps",
+  "description": "Daily progress, tasks and ideas",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
