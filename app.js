@@ -11,8 +11,11 @@ const DEMO = !CFG.API_URL;
 const S = {
   token: null, user: null, data: null, view: 'home',
   f: { q: '', scope: 'open', goal: '', obj: '' },
-  editing: null, form: null
+  editing: null, form: null,
+  easy: { max: 2, q: '', open: new Set() },
+  plan: { cat: null }
 };
+const REQUIRED = ['Main goal', 'Category', 'Objective', 'Due date', 'Est hours', 'Priority', 'Energy'];
 const DEFAULT_STATUSES = ['Not Started', 'In Progress', 'Waiting', 'Completed'];
 const PRIO = { High: 0, Medium: 1, Low: 2, '': 3 };
 
@@ -59,10 +62,30 @@ function niceDate(iso) {
   if (n === 0) return 'today'; if (n === 1) return 'tomorrow'; if (n === -1) return 'yesterday';
   return new Date(d10(iso) + 'T12:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
-const HUES = [174, 205, 24, 268, 336, 128, 45, 230, 0];
+// Reef palette: lagoon, coral, sand-gold, anemone, sea-grass, deep blue, sponge, pink coral
+const HUES = [178, 8, 40, 278, 150, 205, 24, 335];
 function hue(goal) {
   const i = S.data.goals.findIndex(g => g.Name === goal);
   return HUES[(i < 0 ? S.data.goals.length : i) % HUES.length];
+}
+const REEF_ART = `<svg class="art" viewBox="0 0 400 84" preserveAspectRatio="xMidYMax slice" aria-hidden="true">
+  <path d="M0 84V58Q30 44 62 55T124 50T186 57T248 46T310 54T372 45T400 50V84Z" fill="rgba(255,255,255,.10)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M62 84V60M62 70L50 56L45 45M50 56L57 47M62 65L75 51L73 40M75 51L84 45" stroke="#ff8f78" stroke-width="5"/>
+    <path d="M206 84C200 74 212 66 205 56C199 47 209 41 204 32" stroke="#6fdcae" stroke-width="4" opacity=".85"/>
+    <path d="M352 84C346 75 357 69 351 60C346 53 354 47 350 40" stroke="#6fdcae" stroke-width="4" opacity=".7"/>
+    <path d="M300 84L286 56M300 84L294 52M300 84L302 50M300 84L310 53M300 84L318 58" stroke="#c9a7ff" stroke-width="3" opacity=".8"/>
+  </g>
+  <ellipse cx="128" cy="82" rx="24" ry="15" fill="#f3dfb5" opacity=".9"/>
+  <path d="M110 80q6-8 12 0t12 0t12 0" fill="none" stroke="#d9bd86" stroke-width="2"/>
+  <circle cx="252" cy="80" r="9" fill="#ffb0a0" opacity=".9"/><circle cx="264" cy="82" r="6" fill="#ff8f78" opacity=".8"/>
+  <path d="M0 84V74Q100 66 200 75T400 71V84Z" fill="rgba(243,223,181,.35)"/>
+</svg>`;
+const BUBBLES = `<svg class="bubbles" viewBox="0 0 60 70" aria-hidden="true" fill="none" stroke="#fff" stroke-width="1.5">
+  <circle cx="40" cy="58" r="7"/><circle cx="26" cy="36" r="4.5"/><circle cx="44" cy="22" r="3"/><circle cx="30" cy="8" r="2"/></svg>`;
+function initial() { return esc(((S.user && (S.user.name || S.user.email)) || '?').trim()[0].toUpperCase()); }
+function pageTop(title) {
+  return `<div class="ptop"><h1 class="ptitle">${esc(title)}</h1><button class="avatar-btn" data-view="me" aria-label="My account">${initial()}</button></div>`;
 }
 function statuses() { const s = new Set(DEFAULT_STATUSES); S.data.tasks.forEach(t => t.Status && s.add(t.Status)); return [...s]; }
 function openStatus() { return statuses().includes('Not Started') ? 'Not Started' : statuses()[0]; }
@@ -157,15 +180,20 @@ function viewHome() {
       <div class="num">${counts[i] || ''}</div><div class="bar"><span style="height:${counts[i] / max * 100}%"></span></div>
       <div class="lbl">${new Date(d + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'narrow' })}</div></div>`).join('');
 
-  return `<div class="hero"><div class="greet">${hello}${name ? ', ' + esc(name) : ''}</div><div class="date">${dateTxt}</div></div>
-    <div class="card progress">
-      <div class="ring"><svg width="108" height="108" viewBox="0 0 108 108"><circle class="bg" cx="54" cy="54" r="46" fill="none" stroke-width="10"/>
-        <circle class="fg" cx="54" cy="54" r="46" fill="none" stroke-width="10" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct / 100)}"/></svg>
-        <div class="pct">${pct}%</div></div>
-      <div class="txt"><div class="big">${B.doneToday.length} of ${total} tasks done</div>
-        <div class="small">${hAll ? `${hDone.toFixed(1)} of ${hAll.toFixed(1)} h` : 'No hours estimated yet'}</div>
-        <div class="badges">${st ? `<span class="badge hot">🔥 ${st}-day streak</span>` : ''}${B.overdue.length ? `<span class="badge">${B.overdue.length} overdue</span>` : ''}</div></div>
-    </div>
+  return `<section class="reef">
+      ${BUBBLES}
+      <div class="top"><div><div class="greet">${hello}${name ? ', ' + esc(name) : ''}</div><div class="date">${dateTxt}</div></div>
+        <button class="avatar-btn" data-view="me" aria-label="My account">${initial()}</button></div>
+      <div class="prog">
+        <div class="ring"><svg width="104" height="104" viewBox="0 0 108 108"><circle class="bg" cx="54" cy="54" r="46" fill="none" stroke-width="10"/>
+          <circle class="fg" cx="54" cy="54" r="46" fill="none" stroke-width="10" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct / 100)}"/></svg>
+          <div class="pct">${pct}%</div></div>
+        <div><div class="big">${B.doneToday.length} of ${total} tasks done</div>
+          <div class="small">${hAll ? `${hDone.toFixed(1)} of ${hAll.toFixed(1)} h` : 'No hours estimated yet'}</div>
+          <div class="badges">${st ? `<span class="badge hot">🔥 ${st}-day streak</span>` : ''}${B.overdue.length ? `<span class="badge">${B.overdue.length} overdue</span>` : ''}</div></div>
+      </div>
+      ${REEF_ART}
+    </section>
     <div class="card week" aria-label="Tasks completed this week">${week}</div>
 
     <div class="sec-h"><h2>Today <span class="n">${B.planned.length}</span></h2><button class="link" data-act="plan">Plan my day</button></div>
@@ -190,7 +218,7 @@ function viewTasks() {
   sortTasks(arr).forEach(t => { const k = t.Objective || 'No objective'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
   const chip = (lbl, on, act, val) => `<button class="chip" aria-pressed="${on}" data-act="${act}" data-v="${esc(val)}">${esc(lbl)}</button>`;
   const goalChips = S.data.goals.map(g => chip(g.Name, f.goal === g.Name, 'fgoal', g.Name)).join('');
-  return `<div class="ptitle">Tasks</div>
+  return `${pageTop('Tasks')}
     <div class="toolbar"><input class="search" type="search" placeholder="Search tasks" value="${esc(f.q)}" data-f="q" aria-label="Search tasks">
       <div class="chips">${chip('Open', f.scope === 'open', 'fscope', 'open')}${chip('Done', f.scope === 'done', 'fscope', 'done')}${chip('All', f.scope === 'all', 'fscope', 'all')}
         ${f.obj ? `<button class="chip filter" data-act="fobj-clear">${esc(f.obj)} ✕</button>` : ''}</div>
@@ -224,7 +252,41 @@ function viewProjects() {
     return `<section class="card goal" style="--h:${h}"><div class="goal-h"><span class="name">${esc(g)}</span><span class="pct">${gs.p}%</span></div>
       <div class="pbar"><span style="width:${gs.p}%"></span></div><div class="note" style="margin:8px 0 0">${gs.d} of ${gs.n} tasks · ${gs.h.toFixed(1)} h left</div>${catHTML}</section>`;
   }).join('');
-  return `<div class="ptitle">Projects</div>${html || '<div class="empty">No goals yet.</div>'}`;
+  return `${pageTop('Projects')}${html || '<div class="empty">No goals yet.</div>'}`;
+}
+
+/* =====================================================================
+   Easy: low-energy tasks grouped by category
+   ===================================================================== */
+function catOrder() {
+  // categories in goal order, then any category only found in tasks
+  const D = S.data, out = [];
+  D.goals.forEach(g => D.categories.filter(c => c['Main goal'] === g.Name).forEach(c => out.push({ name: c.Name, goal: g.Name })));
+  D.categories.forEach(c => { if (!out.some(o => o.name === c.Name)) out.push({ name: c.Name, goal: c['Main goal'] }); });
+  D.tasks.forEach(t => { if (t.Category && !out.some(o => o.name === t.Category)) out.push({ name: t.Category, goal: t['Main goal'] }); });
+  return out;
+}
+function viewEasy() {
+  const E = S.easy, q = norm(E.q);
+  const open = S.data.tasks.filter(t => !isDone(t));
+  const pool = open.filter(t => Number(t.Energy) > 0 && Number(t.Energy) <= E.max &&
+    (!q || norm([t.Task, t.Objective, t.Category].join(' ')).includes(q)));
+  const unrated = open.filter(t => !(Number(t.Energy) > 0)).length;
+  const groups = catOrder().map(c => ({ c, ts: sortTasks(pool.filter(t => t.Category === c.name)).sort((a, b) => Number(a.Energy) - Number(b.Energy)) }))
+    .filter(g => g.ts.length);
+  const segBtn = (v, l) => `<button type="button" data-act="easy-max" data-v="${v}" aria-pressed="${E.max === v}">${l}</button>`;
+  return `${pageTop('Easy tasks')}
+    <p class="psub">Low-energy tasks for tired moments, grouped by category.</p>
+    <div class="toolbar"><input class="search" type="search" placeholder="Search easy tasks" value="${esc(E.q)}" data-f="easyq" aria-label="Search easy tasks">
+      <div class="field" style="margin:12px 0 0">Energy up to<div class="seg">${segBtn(1, '1 · very easy')}${segBtn(2, '≤ 2')}${segBtn(3, '≤ 3')}</div></div></div>
+    ${groups.length ? groups.map(g => {
+      const h = g.ts.reduce((s, t) => s + hrs(t), 0);
+      const isOpen = q || E.open.has(g.c.name);
+      return `<details class="card acc" data-cat="${esc(g.c.name)}" ${isOpen ? 'open' : ''} style="--h:${hue(g.c.goal)}">
+        <summary><span class="dot"></span><span class="nm">${esc(g.c.name)}<small>${esc(g.c.goal || '')}${h ? ' · ' + h.toFixed(1) + ' h' : ''}</small></span><span class="cnt">${g.ts.length}</span></summary>
+        ${list(g.ts)}</details>`; }).join('')
+      : '<div class="empty">No open task at this energy level.</div>'}
+    ${unrated ? `<p class="note">${unrated} open task${unrated > 1 ? 's have' : ' has'} no energy rating and ${unrated > 1 ? 'are' : 'is'} not shown.</p>` : ''}`;
 }
 
 /* =====================================================================
@@ -233,7 +295,7 @@ function viewProjects() {
 function viewMe() {
   const u = S.user, theme = store.get('tt_theme') || 'auto';
   const last = store.get('tt_last_' + u.email);
-  return `<div class="ptitle">Me</div>
+  return `<div class="ptop"><h1 class="ptitle">Me</h1></div>
     <div class="card me-h"><div class="avatar">${esc((u.name || u.email || '?').trim()[0].toUpperCase())}</div>
       <div><div style="font-weight:700">${esc(u.name || '')}</div><div class="note" style="margin:0">${esc(u.email)}${isAdmin() ? ' · owner' : ''}</div></div></div>
     <div class="card menu">
@@ -281,7 +343,7 @@ function logout(expired) {
 /* =====================================================================
    Render & data flow
    ===================================================================== */
-const VIEWS = { home: viewHome, tasks: viewTasks, projects: viewProjects, me: viewMe };
+const VIEWS = { home: viewHome, tasks: viewTasks, easy: viewEasy, projects: viewProjects, me: viewMe };
 function render() {
   if (!S.data) { $('#app').innerHTML = '<div class="page">' + '<div class="skel"></div>'.repeat(4) + '</div>'; return; }
   const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : null;
@@ -344,6 +406,13 @@ function selectHTML(name, list, val, blank = '—') {
 function seg(name, opts, val) {
   return `<div class="seg" data-seg="${name}">${opts.map(([v, l]) => `<button type="button" data-v="${esc(v)}" aria-pressed="${String(v) === String(val ?? '')}">${l}</button>`).join('')}</div>`;
 }
+function fieldReq(label, name, inner) {
+  return `<div class="field req" data-name="${esc(name)}"><span class="lab">${label}</span>${inner}</div>`;
+}
+function inlineAdd(kind, placeholder) {
+  return `<div class="inline-add hidden" data-kind="${kind}"><input placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">
+    <button type="button" class="btn primary small" data-act="add-item" data-kind="${kind}">Add</button></div>`;
+}
 function openEditor(t) {
   const D = S.data; S.editing = t || null;
   const goal = t ? t['Main goal'] : (S.f.goal || ''), cat = t ? t.Category : '', obj = t ? t.Objective : (S.f.obj || '');
@@ -353,57 +422,98 @@ function openEditor(t) {
   const deps = D.tasks.filter(x => !isDone(x) && (!t || x.ID !== t.ID)).map(x => String(x.Task).replace(/^[^\p{L}\p{N}]+/u, ''));
   const v = k => esc(t ? (t[k] ?? '') : '');
   S.form = { Energy: t ? t.Energy : '', Priority: t ? (t.Priority || '') : '' };
-  const body = `<form id="ed" autocomplete="off" onsubmit="return false">
-    <div class="fs"><label class="field">Task<input name="Task" value="${v('Task')}" placeholder="What needs doing?" required></label>
-      <label class="field">Goal${selectHTML('Main goal', D.goals.map(g => g.Name), goal)}</label>
-      <div class="row2"><label class="field">Category${selectHTML('Category', cats, cat)}</label>
-      <label class="field">Objective${selectHTML('Objective', objs, obj)}</label></div>
-      <button type="button" class="addlink" data-act="new-obj">+ New objective</button>
+  const body = `<form id="ed" autocomplete="off" onsubmit="return false" novalidate>
+    <div class="fs"><div class="field req" data-name="Task"><span class="lab">Task</span><input name="Task" value="${v('Task')}" placeholder="What needs doing?"></div>
+      ${fieldReq('Goal', 'Main goal', selectHTML('Main goal', D.goals.map(g => g.Name), goal))}
+      <button type="button" class="addlink" data-act="show-add" data-kind="goals">+ New goal</button>${inlineAdd('goals', 'New goal, e.g. 🌊 Research')}
+      ${fieldReq('Category', 'Category', selectHTML('Category', cats, cat))}
+      <button type="button" class="addlink" data-act="show-add" data-kind="categories">+ New category in this goal</button>${inlineAdd('categories', 'New category, e.g. 🐠 Fish survey')}
+      ${fieldReq('Objective', 'Objective', selectHTML('Objective', objs, obj))}
+      <button type="button" class="addlink" data-act="show-add" data-kind="objectives">+ New objective in this category</button>${inlineAdd('objectives', 'New objective')}
       ${t ? '' : '<label class="switch">Start the name with the objective\'s emoji<input type="checkbox" name="prefix" checked></label>'}</div>
     <div class="fs"><div class="lg">When</div>
       <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && isTrue(t.Today) ? 'checked' : ''}></label>
-      <div class="row2"><label class="field">Due date<input type="date" name="Due date" value="${d10(t && t['Due date'])}"></label>
-      <label class="field">Scheduled<input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div></div>
+      <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${d10(t && t['Due date'])}">`)}
+      <label class="field"><span class="lab">Scheduled</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div></div>
     <div class="fs"><div class="lg">Effort</div>
-      <div class="row2"><label class="field">Hours<input type="number" name="Est hours" min="0" step="0.25" value="${v('Est hours')}" placeholder="e.g. 1.5"></label>
-      <label class="field">Status${selectHTML('Status', statuses(), t ? t.Status : openStatus(), '—').replace('<option value="">—</option>', '')}</label></div>
-      <div class="field">Priority${seg('Priority', [['', 'None'], ['Low', 'Low'], ['Medium', 'Medium'], ['High', 'High']], S.form.Priority)}</div>
-      <div class="field">Energy (1 easy → 5 demanding)${seg('Energy', [['', '–'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [5, '5']], S.form.Energy)}</div></div>
+      <div class="row2">${fieldReq('Hours', 'Est hours', `<input type="number" inputmode="decimal" name="Est hours" min="0" step="0.25" value="${v('Est hours')}" placeholder="e.g. 1.5">`)}
+      <label class="field"><span class="lab">Status</span>${selectHTML('Status', statuses(), t ? t.Status : openStatus(), '—').replace('<option value="">—</option>', '')}</label></div>
+      ${fieldReq('Priority', 'Priority', seg('Priority', [['Low', 'Low'], ['Medium', 'Medium'], ['High', 'High']], S.form.Priority))}
+      ${fieldReq('Energy (1 easy → 5 demanding)', 'Energy', seg('Energy', [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [5, '5']], S.form.Energy))}</div>
     ${isAdmin() ? `<div class="fs"><div class="lg">Reclaim</div>
       <label class="switch"><span>Send to Reclaim<small>Goes to Google Tasks and gets scheduled in your calendar</small></span><input type="checkbox" name="Reclaim" ${t && inReclaim(t) ? 'checked' : ''}></label>
       <label class="switch"><span>▶ Do now<small>Moves its Reclaim block to start now</small></span><input type="checkbox" name="Start now" ${t && isDoNow(t) ? 'checked' : ''}></label></div>` : ''}
     <div class="fs"><div class="lg">Details</div>
-      <label class="field">Context<input name="Context" list="ctxL" value="${v('Context')}"></label>
-      <label class="field">Depends on<input name="Dependencies" list="depL" value="${v('Dependencies')}" placeholder="Another task (optional)"></label>
-      <label class="field">Waiting on<input name="Waiting on" value="${v('Waiting on')}" placeholder="Person or event"></label>
-      <label class="field">Notes<textarea name="Notes">${v('Notes')}</textarea></label>
+      <label class="field"><span class="lab">Context</span><input name="Context" list="ctxL" value="${v('Context')}"></label>
+      <label class="field"><span class="lab">Depends on</span><input name="Dependencies" list="depL" value="${v('Dependencies')}" placeholder="Another task (optional)"></label>
+      <label class="field"><span class="lab">Waiting on</span><input name="Waiting on" value="${v('Waiting on')}" placeholder="Person or event"></label>
+      <label class="field"><span class="lab">Notes</span><textarea name="Notes">${v('Notes')}</textarea></label>
       <datalist id="ctxL">${ctx.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       <datalist id="depL">${deps.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+    <p class="note" style="margin:0 0 16px"><span style="color:var(--coral)">*</span> required for new tasks</p>
     ${t ? '<button type="button" class="btn danger block" data-act="delete">Delete task</button>' : ''}
   </form>`;
   openSheet(t ? 'Edit task' : 'New task', body, saveEditor);
   const f = $('#ed');
-  f['Main goal'].onchange = () => { refill(f.Category, D.categories.filter(c => !f['Main goal'].value || c['Main goal'] === f['Main goal'].value).map(c => c.Name)); refill(f.Objective, []); };
+  f['Main goal'].onchange = () => { refill(f.Category, catsOf(f['Main goal'].value)); refill(f.Objective, []); };
   f.Category.onchange = () => {
-    const c = D.categories.find(x => x.Name === f.Category.value); if (c && !f['Main goal'].value) f['Main goal'].value = c['Main goal'];
-    refill(f.Objective, D.objectives.filter(o => o.Category === f.Category.value).map(o => o.Name));
+    const c = S.data.categories.find(x => x.Name === f.Category.value); if (c && !f['Main goal'].value) f['Main goal'].value = c['Main goal'];
+    refill(f.Objective, objsOf(f.Category.value));
   };
+  f.addEventListener('input', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); });
+  f.addEventListener('change', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); });
   if (!t) setTimeout(() => f.Task.focus(), 260);
 }
-function refill(sel, list) { sel.innerHTML = '<option value="">—</option>' + list.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(''); }
+const catsOf = g => S.data.categories.filter(c => !g || c['Main goal'] === g).map(c => c.Name);
+const objsOf = c => S.data.objectives.filter(o => o.Category === c).map(o => o.Name);
+function refill(sel, list, val) { sel.innerHTML = '<option value="">—</option>' + list.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(''); if (val) sel.value = val; }
+
+async function addItem(kind) {
+  const f = $('#ed'), box = f.querySelector(`.inline-add[data-kind="${kind}"]`), name = box.querySelector('input').value.trim();
+  if (!name) return toast('Type a name first');
+  const item = { Name: name };
+  if (kind === 'categories') { if (!f['Main goal'].value) return toast('Choose or create a goal first'); item['Main goal'] = f['Main goal'].value; }
+  if (kind === 'objectives') { if (!f.Category.value) return toast('Choose or create a category first'); item.Category = f.Category.value; }
+  syncing(true, 'Saving…');
+  try {
+    const r = await api('addItem', { kind, item }); setData(r.data);
+    if (kind === 'goals') { refill(f['Main goal'], S.data.goals.map(g => g.Name), name); refill(f.Category, []); refill(f.Objective, []); }
+    if (kind === 'categories') { refill(f.Category, catsOf(f['Main goal'].value), name); refill(f.Objective, []); }
+    if (kind === 'objectives') refill(f.Objective, objsOf(f.Category.value), name);
+    box.classList.add('hidden'); box.querySelector('input').value = '';
+    f.querySelectorAll('.field.invalid').forEach(x => x.classList.remove('invalid'));
+    toast({ goals: 'Goal', categories: 'Category', objectives: 'Objective' }[kind] + ' added');
+  } catch (e) { toast('Not added: ' + e.message); } finally { syncing(false); }
+}
+
+function missingFields(f, p) {
+  const miss = [];
+  if (!p.Task) miss.push('Task');
+  REQUIRED.forEach(k => {
+    const val = p[k];
+    if (k === 'Est hours' ? !(Number(val) > 0) : !String(val ?? '').trim()) miss.push(k);
+  });
+  f.querySelectorAll('.field.req').forEach(x => x.classList.toggle('invalid', miss.includes(x.dataset.name)));
+  return miss;
+}
+const LABELS = { 'Main goal': 'Goal', 'Est hours': 'Hours', 'Due date': 'Due date' };
 
 async function saveEditor() {
   const f = $('#ed'), t = S.editing;
-  const name = f.Task.value.trim(); if (!name) { f.Task.focus(); return toast('Give the task a name'); }
   const p = {};
   ['Task', 'Main goal', 'Category', 'Objective', 'Status', 'Est hours', 'Due date', 'Scheduled date', 'Context', 'Dependencies', 'Waiting on', 'Notes']
     .forEach(k => p[k] = f[k].value.trim());
-  p.Today = f.Today.checked; p.Priority = S.form.Priority; p.Energy = S.form.Energy;
+  p.Today = f.Today.checked; p.Priority = S.form.Priority || ''; p.Energy = S.form.Energy || '';
+  const miss = missingFields(f, p);
+  if (miss.length) {
+    const first = f.querySelector('.field.invalid'); if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const txt = miss.map(k => LABELS[k] || k).join(', ');
+    if (!t) return toast('Please fill: ' + txt);
+    if (!p.Task || !confirm('Still empty: ' + txt + '. Save anyway?')) return;
+  }
   if (isAdmin()) {
     p.Reclaim = f.Reclaim.checked ? 'YES' : 'NOT YET';
     p['Start now'] = f.Reclaim.checked && f['Start now'].checked ? 'do now' : '';
-    if (f.Reclaim.checked && !(t && inReclaim(t)) && !(Number(p['Est hours']) > 0) &&
-        !confirm('No hours set: Reclaim will use its default duration. Send anyway?')) return;
   }
   if (!t && f.prefix && f.prefix.checked && p.Objective) { const pre = lead(p.Objective); if (pre && !lead(p.Task)) p.Task = pre + ' ' + p.Task; }
   closeSheet();
@@ -415,17 +525,41 @@ async function saveEditor() {
   }
 }
 
+/* Plan my day: step 1 choose a category, step 2 choose its tasks */
 function openPlan() {
-  const td = today();
-  const cands = S.data.tasks.filter(t => !isDone(t)).sort((a, b) => {
-    const s = t => (isTrue(t.Today) ? -10 : 0) + (d10(t['Due date']) && d10(t['Due date']) <= td ? -5 : 0) + (t.Status === 'In Progress' ? -3 : 0) + PRIO[t.Priority || ''];
-    return s(a) - s(b) || (d10(a['Due date']) || '9999').localeCompare(d10(b['Due date']) || '9999');
-  }).slice(0, 40);
-  const rows = cands.map(t => `<div class="plan-row" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
+  S.plan.cat = null;
+  openSheet('Plan my day', planBody(), closeSheet, 'Done');
+}
+function planBody() {
+  const td = today(), open = S.data.tasks.filter(t => !isDone(t));
+  if (!S.plan.cat) {
+    const urgent = open.filter(t => d10(t['Due date']) && dayDiff(d10(t['Due date']), td) <= 2);
+    const urgentPlanned = urgent.filter(t => isTrue(t.Today)).length;
+    let lastGoal = null, rows = '';
+    catOrder().forEach(c => {
+      const ts = open.filter(t => t.Category === c.name); if (!ts.length) return;
+      if (c.goal !== lastGoal) { rows += `<div class="goal-lbl">${esc(c.goal || 'No goal')}</div>`; lastGoal = c.goal; }
+      const planned = ts.filter(t => isTrue(t.Today)).length;
+      rows += `<button class="plan-cat" data-act="plan-cat" data-v="${esc(c.name)}" style="--h:${hue(c.goal)}"><span class="dot"></span>
+        <span class="nm">${esc(c.name)}<small>${ts.length} open task${ts.length > 1 ? 's' : ''}</small></span>
+        <span class="cnt">${planned ? `<b>☀️ ${planned}</b>` : ''}</span></button>`;
+    });
+    return `<p class="note" style="margin-top:0">Choose a category, then tap ☀️ on the tasks you want to do today.</p>
+      ${urgent.length ? `<button class="plan-cat urgent" data-act="plan-cat" data-v="__urgent"><span>⚠️</span><span class="nm">Overdue &amp; due in 2 days<small>${urgent.length} task${urgent.length > 1 ? 's' : ''}</small></span><span class="cnt">${urgentPlanned ? `<b>☀️ ${urgentPlanned}</b>` : ''}</span></button>` : ''}
+      ${rows || '<div class="empty">No open tasks.</div>'}`;
+  }
+  const isUrgent = S.plan.cat === '__urgent';
+  const ts = sortTasks(open.filter(t => isUrgent ? (d10(t['Due date']) && dayDiff(d10(t['Due date']), td) <= 2) : t.Category === S.plan.cat), 'prio');
+  const rows = ts.map(t => `<div class="plan-row" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
       <button class="ibtn sun ${isTrue(t.Today) ? 'on' : ''}" data-act="today" aria-label="Plan for today">☀️</button>
-      <div class="tmain"><div class="ttitle">${esc(t.Task)}</div><div class="tmeta"><span class="cat"><i></i>${esc(t.Category || '')}</span>
-      ${d10(t['Due date']) ? `<span class="${d10(t['Due date']) < td ? 'over' : ''}">Due ${niceDate(t['Due date'])}</span>` : ''}${hrs(t) ? `<span>${hrs(t)} h</span>` : ''}</div></div></div>`).join('');
-  openSheet('Plan my day', `<p class="note" style="margin-top:0">Tap ☀️ to add a task to today. Overdue and high-priority tasks are listed first.</p>${rows || '<div class="empty">No open tasks.</div>'}`, closeSheet, 'Done');
+      <div class="tmain"><div class="ttitle">${esc(t.Task)}</div><div class="tmeta">
+      ${isUrgent ? `<span class="cat"><i></i>${esc(t.Category || '')}</span>` : `<span>${esc(t.Objective || '')}</span>`}
+      ${d10(t['Due date']) ? `<span class="${d10(t['Due date']) < td ? 'over' : ''}">Due ${niceDate(t['Due date'])}</span>` : ''}
+      ${hrs(t) ? `<span>${hrs(t)} h</span>` : ''}
+      ${t.Energy ? `<span class="energy">${'<b>●</b>'.repeat(Math.min(5, Number(t.Energy) || 0))}${'<i>●</i>'.repeat(Math.max(0, 5 - (Number(t.Energy) || 0)))}</span>` : ''}</div></div></div>`).join('');
+  return `<button class="plan-back" data-act="plan-back">‹ All categories</button>
+    <h4 style="margin:0 0 6px;font-size:18px">${isUrgent ? '⚠️ Overdue &amp; due soon' : esc(S.plan.cat)}</h4>
+    ${rows || '<div class="empty">No open tasks here.</div>'}`;
 }
 
 function openPassword() {
@@ -446,7 +580,12 @@ document.addEventListener('click', async e => {
   const nav = e.target.closest('[data-view]');
   if (nav) { S.view = nav.dataset.view; render(); window.scrollTo(0, 0); return; }
   const segBtn = e.target.closest('[data-seg] button');
-  if (segBtn) { const n = segBtn.parentElement.dataset.seg; S.form[n] = segBtn.dataset.v; segBtn.parentElement.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', b === segBtn)); return; }
+  if (segBtn) {
+    const n = segBtn.parentElement.dataset.seg; S.form[n] = segBtn.dataset.v;
+    segBtn.parentElement.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', b === segBtn));
+    const fl = segBtn.closest('.field'); if (fl) fl.classList.remove('invalid');
+    return;
+  }
   if (e.target.id === 'scrim') return closeSheet();
   const a = e.target.closest('[data-act]'); if (!a) return;
   const act = a.dataset.act, row = a.closest('[data-id]'), t = row && S.data ? S.data.tasks.find(x => x.ID === row.dataset.id) : null;
@@ -460,6 +599,15 @@ document.addEventListener('click', async e => {
     case 'open': openEditor(t); break;
     case 'new': openEditor(null); break;
     case 'plan': openPlan(); break;
+    case 'plan-cat': S.plan.cat = a.dataset.v; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; break;
+    case 'plan-back': S.plan.cat = null; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; break;
+    case 'easy-max': S.easy.max = Number(a.dataset.v); render(); break;
+    case 'show-add': {
+      const box = $(`#ed .inline-add[data-kind="${a.dataset.kind}"]`); box.classList.toggle('hidden');
+      if (!box.classList.contains('hidden')) box.querySelector('input').focus();
+      break;
+    }
+    case 'add-item': addItem(a.dataset.kind); break;
     case 'close-sheet': closeSheet(); break;
     case 'fscope': S.f.scope = a.dataset.v; render(); break;
     case 'fgoal': S.f.goal = a.dataset.v; render(); break;
@@ -489,8 +637,20 @@ document.addEventListener('click', async e => {
     }
   }
 });
-document.addEventListener('input', e => { if (e.target.dataset && e.target.dataset.f) { S.f[e.target.dataset.f] = e.target.value; render(); } });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+document.addEventListener('input', e => {
+  const k = e.target.dataset && e.target.dataset.f; if (!k) return;
+  if (k === 'easyq') S.easy.q = e.target.value; else S.f[k] = e.target.value;
+  render();
+});
+// remember which category accordions are open on the Easy page
+document.addEventListener('toggle', e => {
+  const d = e.target; if (!d.classList || !d.classList.contains('acc') || S.easy.q) return;
+  if (d.open) S.easy.open.add(d.dataset.cat); else S.easy.open.delete(d.dataset.cat);
+}, true);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSheet();
+  if (e.key === 'Enter' && e.target.closest && e.target.closest('.inline-add')) { e.preventDefault(); addItem(e.target.closest('.inline-add').dataset.kind); }
+});
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.user && S.data) refresh(false); });
 
 function applyTheme() { const t = store.get('tt_theme') || 'auto'; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t; }

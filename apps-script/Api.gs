@@ -86,19 +86,20 @@ function tt_findUser_(email) {
   const rows = sh.getDataRange().getValues();
   for (let i = 1; i < rows.length; i++) {
     if (String(rows[i][0]).trim().toLowerCase() === email) {
-      return { row: i + 1, email: email, name: rows[i][1], role: String(rows[i][2] || 'user').toLowerCase(), salt: rows[i][3], hash: rows[i][4] };
+      return { row: i + 1, email: email, name: rows[i][1], role: String(rows[i][2] || 'user').trim().toLowerCase(), salt: String(rows[i][3]), hash: String(rows[i][4]) };
     }
   }
   return null;
 }
 
 function tt_hash_(password, salt) {
-  let h = String(password);
+  let h = String(password).trim();
   for (let i = 0; i < TT.HASH_ROUNDS; i++) {
     h = Utilities.base64Encode(Utilities.computeDigest(
       Utilities.DigestAlgorithm.SHA_256, salt + ':' + h, Utilities.Charset.UTF_8));
   }
-  return h;
+  // "h_" prefix: a value starting with + or = would be read as a formula by Sheets
+  return 'h_' + h;
 }
 
 function tt_login_(email, password) {
@@ -140,12 +141,25 @@ function tt_cleanSessions_(props) {
 
 function tt_setPassword_(email, name, role, password) {
   const sh = tt_usersSheet_();
-  const salt = Utilities.getUuid();
+  const salt = 's_' + Utilities.getUuid();
   const hash = tt_hash_(password, salt);
   const u = tt_findUser_(email);
   const row = [String(email).trim().toLowerCase(), name || (u && u.name) || '', role || (u && u.role) || 'user', salt, hash, new Date()];
-  if (u) sh.getRange(u.row, 1, 1, 6).setValues([row]);
-  else sh.appendRow(row);
+  const r = u ? u.row : sh.getLastRow() + 1;
+  sh.getRange(r, 1, 1, 5).setNumberFormat('@');   // store as plain text, never as formula
+  sh.getRange(r, 1, 1, 6).setValues([row]);
+  SpreadsheetApp.flush();
+}
+
+/* Menu: check a login directly in the sheet, to find out why it fails */
+function ttMenuTestLogin() {
+  const ui = SpreadsheetApp.getUi();
+  const e = ui.prompt('Test a login', 'Email:', ui.ButtonSet.OK_CANCEL); if (e.getSelectedButton() !== ui.Button.OK) return;
+  const p = ui.prompt('Test a login', 'Password:', ui.ButtonSet.OK_CANCEL); if (p.getSelectedButton() !== ui.Button.OK) return;
+  const u = tt_findUser_(e.getResponseText());
+  if (!u) { ui.alert('No user with this email in the Users tab.'); return; }
+  if (String(u.hash).indexOf('h_') !== 0) { ui.alert('This user was saved with the old format. Use "Add or reset a user" to set the password again.'); return; }
+  ui.alert(tt_hash_(p.getResponseText(), u.salt) === u.hash ? 'OK: this email and password work.' : 'Wrong password for ' + u.email + '.');
 }
 
 function tt_changePassword_(user, oldPw, newPw) {
@@ -159,6 +173,7 @@ function tt_changePassword_(user, oldPw, newPw) {
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Task Tracker')
     .addItem('Add or reset a user', 'ttMenuAddUser')
+    .addItem('Test a login', 'ttMenuTestLogin')
     .addToUi();
 }
 

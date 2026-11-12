@@ -1,8 +1,8 @@
 // Service worker: makes the app installable and opens it instantly from cache.
 // Bump VERSION after each change you push, so phones pick up the new files.
-const VERSION = 'tt-v1';
+const VERSION = 'tt-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
-  'icons/icon-192.png', 'icons/icon-512.png'];
+  'icons/icon-192.png', 'icons/icon-512.png', 'bg/reef.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
