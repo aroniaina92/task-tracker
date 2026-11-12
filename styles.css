@@ -290,3 +290,15 @@ body::before{content:"";position:fixed;inset:0;z-index:-2;background:#2a96a6 url
 .avatar-btn{background:rgba(255,255,255,.22);color:#fff}
 .reef{box-shadow:0 10px 30px rgba(4,30,45,.35);border:1px solid rgba(255,255,255,.18)}
 .login{background:none}
+
+/* ===== Task card actions (Reclaim / Do now) ===== */
+.tbody{flex:1;min-width:0}
+.tacts{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.pill{border:1px solid var(--line);background:transparent;border-radius:99px;padding:6px 12px;font-size:13px;font-weight:600;color:var(--muted);white-space:nowrap}
+.pill:hover{border-color:var(--accent);color:var(--accent)}
+.pill.on{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+.pill.now.on{background:var(--coral);border-color:var(--coral);color:var(--coral-ink)}
+.task.doing{border:1.5px solid var(--coral);box-shadow:0 0 0 3px color-mix(in srgb,var(--coral) 25%,transparent)}
+.nprev{font-size:13px;color:var(--muted);font-weight:500;margin-top:2px}
+.nprev b{color:var(--text)}
+#objPrev{margin:-8px 0 14px}

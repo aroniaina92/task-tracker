@@ -52,6 +52,17 @@ const isTrue = v => v === true || String(v).toUpperCase() === 'TRUE';
 const inReclaim = t => String(t.Reclaim || '').trim().toUpperCase() === 'YES';
 const isDoNow = t => String(t['Start now'] || '').trim().toLowerCase() === 'do now';
 const isAdmin = () => S.user && S.user.role === 'admin';
+// Put `prefix` emojis in front of a name: withPrefix('🔰', '📋 Questionnaire') -> '🔰📋 Questionnaire'
+function withPrefix(prefix, text) {
+  text = String(text || '').trim(); if (!prefix) return text;
+  const ownRaw = (text.match(/^[^\p{L}\p{N}]+/u) || [''])[0], own = ownRaw.replace(/\s+/g, '');
+  const rest = text.slice(ownRaw.length).trim();
+  const emo = own.startsWith(prefix) ? own : prefix + own;
+  return rest ? emo + ' ' + rest : emo;
+}
+function okToSend(t) {
+  return hrs(t) > 0 || confirm('This task has no hours, so Reclaim will use its default duration. Send anyway?');
+}
 const hrs = t => Number(t['Est hours']) || 0;
 const today = () => S.data.today;
 function addDays(iso, n) { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
@@ -120,15 +131,18 @@ function card(t, opts = {}) {
     if (t['Waiting on']) m.push(`<span class="wait">⏳ ${esc(t['Waiting on'])}</span>`);
   } else if (t['Completed on']) m.push(`<span>Done ${niceDate(t['Completed on'])}</span>`);
 
-  const side = [];
+  const side = [], acts = [];
   if (!isDone(t)) {
-    if (isAdmin() && inReclaim(t) && !opts.noNow)
-      side.push(`<button class="now ${isDoNow(t) ? 'on' : ''}" data-act="donow" title="Move the Reclaim block to start now">${isDoNow(t) ? '▶ now' : '▶'}</button>`);
     side.push(`<button class="ibtn sun ${isTrue(t.Today) ? 'on' : ''}" data-act="today" aria-label="Plan for today" title="Plan for today">☀️</button>`);
+    if (isAdmin()) {
+      acts.push(`<button class="pill ${inReclaim(t) ? 'on' : ''}" data-act="reclaim" aria-pressed="${inReclaim(t)}">📅 ${inReclaim(t) ? 'In Reclaim' : 'Send to Reclaim'}</button>`);
+      acts.push(`<button class="pill now ${isDoNow(t) ? 'on' : ''}" data-act="donow" aria-pressed="${isDoNow(t)}">▶ ${isDoNow(t) ? 'Doing now' : 'Do now'}</button>`);
+    }
   }
-  return `<article class="task ${isDone(t) ? 'done' : ''}" style="--h:${hue(t['Main goal'])}" data-id="${esc(t.ID)}">
+  return `<article class="task ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" style="--h:${hue(t['Main goal'])}" data-id="${esc(t.ID)}">
     <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
-    <div class="tmain" data-act="open"><div class="ttitle">${esc(t.Task)}</div><div class="tmeta">${m.join('')}</div></div>
+    <div class="tbody"><div class="tmain" data-act="open"><div class="ttitle">${esc(t.Task)}</div><div class="tmeta">${m.join('')}</div></div>
+      ${acts.length ? `<div class="tacts">${acts.join('')}</div>` : ''}</div>
     <div class="tside">${side.join('')}</div></article>`;
 }
 const list = arr => `<div class="list">${arr.map(t => card(t)).join('')}</div>`;
@@ -145,12 +159,14 @@ function sortTasks(arr, by = 'due') {
 function todayBuckets() {
   const td = today(), T = S.data.tasks;
   const open = T.filter(t => !isDone(t));
-  const planned = open.filter(t => isTrue(t.Today) || d10(t['Due date']) === td || d10(t['Scheduled date']) === td);
+  // "Do now" tasks always belong to today, shown first
+  const planned = open.filter(t => isDoNow(t) || isTrue(t.Today) || d10(t['Due date']) === td || d10(t['Scheduled date']) === td);
   const ids = new Set(planned.map(t => t.ID));
   const overdue = sortTasks(open.filter(t => !ids.has(t.ID) && d10(t['Due date']) && d10(t['Due date']) < td));
   const progress = open.filter(t => !ids.has(t.ID) && !overdue.includes(t) && t.Status === 'In Progress');
   const doneToday = T.filter(t => isDone(t) && d10(t['Completed on']) === td);
-  return { planned: sortTasks(planned, 'prio'), overdue, progress, doneToday };
+  const sorted = sortTasks(planned, 'prio').sort((a, b) => (isDoNow(b) ? 1 : 0) - (isDoNow(a) ? 1 : 0));
+  return { planned: sorted, overdue, progress, doneToday };
 }
 function streak() {
   const days = new Set(S.data.tasks.filter(isDone).map(t => d10(t['Completed on'])));
@@ -360,6 +376,7 @@ async function refresh(showSpinner) {
 }
 function start() {
   $('#nav').classList.remove('hidden');
+  S.view = 'home'; resetHistory();
   const cached = store.get('tt_cache_' + S.user.email);
   if (cached) { S.data = cached; render(); refresh(false); }
   else { render(); refresh(true); }
@@ -391,13 +408,46 @@ function runSync(loud) {
 /* =====================================================================
    Bottom sheet (editor, plan, password)
    ===================================================================== */
-function openSheet(title, body, onSave, saveLabel = 'Save') {
+/* ---------- Phone back button ----------
+   Every page and every open panel is one step in the browser history.
+   Back closes the panel, then returns to the previous page, then (from Home) closes the app. */
+const NAV = { depth: 0, sheet: 0 };
+function go(view, keepScroll) {
+  if (view === S.view) { if (!keepScroll) window.scrollTo(0, 0); return; }
+  if (view === 'home' && NAV.depth > 0) { history.go(-NAV.depth); return; } // pop back to Home
+  NAV.depth += 1;
+  history.pushState({ view, depth: NAV.depth }, '');
+  S.view = view; render(); window.scrollTo(0, 0);
+}
+function pushSheet(extra) { NAV.sheet += 1; history.pushState(Object.assign({ view: S.view, depth: NAV.depth, sheet: NAV.sheet }, extra || {}), ''); }
+window.addEventListener('popstate', e => {
+  const st = e.state || { view: 'home', depth: 0 };
+  if (!S.user || !S.data) return;
+  const sheetOpen = $('#sheet').classList.contains('open');
+  if (st.sheet && sheetOpen) {          // still inside the panel (e.g. Plan step 2 -> step 1)
+    NAV.sheet = st.sheet;
+    if (st.plan !== undefined) { S.plan.cat = st.cat || null; $('#sheetBody').innerHTML = planBody(); }
+    return;
+  }
+  if (sheetOpen) hideSheet();
+  NAV.sheet = 0; NAV.depth = st.depth || 0;
+  if (S.view !== (st.view || 'home')) { S.view = st.view || 'home'; render(); window.scrollTo(0, 0); }
+});
+function resetHistory() { NAV.depth = 0; NAV.sheet = 0; history.replaceState({ view: 'home', depth: 0 }, ''); }
+
+function openSheet(title, body, onSave, saveLabel = 'Save', extra) {
   $('#sheetTitle').textContent = title; $('#sheetBody').innerHTML = body;
   const sb = $('#sheetSave'); sb.textContent = saveLabel; sb.classList.toggle('hidden', !onSave); sb.onclick = onSave;
   $('#sheet').classList.add('open'); $('#scrim').classList.add('open');
   $('#sheetBody').scrollTop = 0;
+  pushSheet(extra);
 }
-function closeSheet() { $('#sheet').classList.remove('open'); $('#scrim').classList.remove('open'); S.editing = null; }
+function hideSheet() { $('#sheet').classList.remove('open'); $('#scrim').classList.remove('open'); S.editing = null; }
+// Close from a button (Cancel, Save, Done): remove the panel's history steps too.
+function closeSheet() {
+  if (NAV.sheet > 0) { const n = NAV.sheet; NAV.sheet = 0; hideSheet(); history.go(-n); }
+  else hideSheet();
+}
 
 function selectHTML(name, list, val, blank = '—') {
   const all = list.slice(); if (val && !all.includes(val)) all.push(val);
@@ -423,14 +473,15 @@ function openEditor(t) {
   const v = k => esc(t ? (t[k] ?? '') : '');
   S.form = { Energy: t ? t.Energy : '', Priority: t ? (t.Priority || '') : '' };
   const body = `<form id="ed" autocomplete="off" onsubmit="return false" novalidate>
-    <div class="fs"><div class="field req" data-name="Task"><span class="lab">Task</span><input name="Task" value="${v('Task')}" placeholder="What needs doing?"></div>
+    <div class="fs"><div class="field req" data-name="Task"><span class="lab">Task</span><input name="Task" value="${v('Task')}" placeholder="What needs doing?">
+        ${t ? '' : '<div class="nprev" id="taskPrev"></div>'}</div>
       ${fieldReq('Goal', 'Main goal', selectHTML('Main goal', D.goals.map(g => g.Name), goal))}
       <button type="button" class="addlink" data-act="show-add" data-kind="goals">+ New goal</button>${inlineAdd('goals', 'New goal, e.g. 🌊 Research')}
       ${fieldReq('Category', 'Category', selectHTML('Category', cats, cat))}
       <button type="button" class="addlink" data-act="show-add" data-kind="categories">+ New category in this goal</button>${inlineAdd('categories', 'New category, e.g. 🐠 Fish survey')}
       ${fieldReq('Objective', 'Objective', selectHTML('Objective', objs, obj))}
-      <button type="button" class="addlink" data-act="show-add" data-kind="objectives">+ New objective in this category</button>${inlineAdd('objectives', 'New objective')}
-      ${t ? '' : '<label class="switch">Start the name with the objective\'s emoji<input type="checkbox" name="prefix" checked></label>'}</div>
+      <button type="button" class="addlink" data-act="show-add" data-kind="objectives">+ New objective in this category</button>${inlineAdd('objectives', 'New objective, e.g. 📋 Questionnaire')}<div class="nprev hidden" id="objPrev"></div>
+</div>
     <div class="fs"><div class="lg">When</div>
       <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && isTrue(t.Today) ? 'checked' : ''}></label>
       <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${d10(t && t['Due date'])}">`)}
@@ -460,8 +511,20 @@ function openEditor(t) {
     const c = S.data.categories.find(x => x.Name === f.Category.value); if (c && !f['Main goal'].value) f['Main goal'].value = c['Main goal'];
     refill(f.Objective, objsOf(f.Category.value));
   };
-  f.addEventListener('input', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); });
-  f.addEventListener('change', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); });
+  // live previews of the automatic emoji prefixes
+  const updPrev = () => {
+    const tp = $('#taskPrev');
+    if (tp) { const nm = f.Task.value.trim(), pre = lead(f.Objective.value);
+      tp.innerHTML = nm && pre ? `Saved as: <b>${esc(withPrefix(pre, nm))}</b>` : (pre ? `The objective's emoji ${esc(pre)} will be added before the name` : ''); }
+    const op = $('#objPrev'), oi = f.querySelector('.inline-add[data-kind="objectives"]');
+    if (op) { const nm = oi.querySelector('input').value.trim(), pre = lead(f.Category.value);
+      op.classList.toggle('hidden', oi.classList.contains('hidden') || !pre);
+      op.innerHTML = nm ? `Saved as: <b>${esc(withPrefix(pre, nm))}</b>` : `The category's emoji ${esc(pre)} will be added first`; }
+  };
+  f.addEventListener('input', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); updPrev(); });
+  f.addEventListener('change', e => { const fl = e.target.closest('.field'); if (fl) fl.classList.remove('invalid'); updPrev(); });
+  f.addEventListener('click', () => setTimeout(updPrev, 0));
+  updPrev();
   if (!t) setTimeout(() => f.Task.focus(), 260);
 }
 const catsOf = g => S.data.categories.filter(c => !g || c['Main goal'] === g).map(c => c.Name);
@@ -471,7 +534,7 @@ function refill(sel, list, val) { sel.innerHTML = '<option value="">—</option>
 async function addItem(kind) {
   const f = $('#ed'), box = f.querySelector(`.inline-add[data-kind="${kind}"]`), name = box.querySelector('input').value.trim();
   if (!name) return toast('Type a name first');
-  const item = { Name: name };
+  const item = { Name: kind === 'objectives' ? withPrefix(lead(f.Category.value), name) : name };
   if (kind === 'categories') { if (!f['Main goal'].value) return toast('Choose or create a goal first'); item['Main goal'] = f['Main goal'].value; }
   if (kind === 'objectives') { if (!f.Category.value) return toast('Choose or create a category first'); item.Category = f.Category.value; }
   syncing(true, 'Saving…');
@@ -479,7 +542,7 @@ async function addItem(kind) {
     const r = await api('addItem', { kind, item }); setData(r.data);
     if (kind === 'goals') { refill(f['Main goal'], S.data.goals.map(g => g.Name), name); refill(f.Category, []); refill(f.Objective, []); }
     if (kind === 'categories') { refill(f.Category, catsOf(f['Main goal'].value), name); refill(f.Objective, []); }
-    if (kind === 'objectives') refill(f.Objective, objsOf(f.Category.value), name);
+    if (kind === 'objectives') refill(f.Objective, objsOf(f.Category.value), item.Name);
     box.classList.add('hidden'); box.querySelector('input').value = '';
     f.querySelectorAll('.field.invalid').forEach(x => x.classList.remove('invalid'));
     toast({ goals: 'Goal', categories: 'Category', objectives: 'Objective' }[kind] + ' added');
@@ -515,7 +578,7 @@ async function saveEditor() {
     p.Reclaim = f.Reclaim.checked ? 'YES' : 'NOT YET';
     p['Start now'] = f.Reclaim.checked && f['Start now'].checked ? 'do now' : '';
   }
-  if (!t && f.prefix && f.prefix.checked && p.Objective) { const pre = lead(p.Objective); if (pre && !lead(p.Task)) p.Task = pre + ' ' + p.Task; }
+  if (!t && p.Objective) p.Task = withPrefix(lead(p.Objective), p.Task);
   closeSheet();
   if (t) { p.ID = t.ID; await save(p, 'Saved'); }
   else {
@@ -528,7 +591,7 @@ async function saveEditor() {
 /* Plan my day: step 1 choose a category, step 2 choose its tasks */
 function openPlan() {
   S.plan.cat = null;
-  openSheet('Plan my day', planBody(), closeSheet, 'Done');
+  openSheet('Plan my day', planBody(), closeSheet, 'Done', { plan: 1 });
 }
 function planBody() {
   const td = today(), open = S.data.tasks.filter(t => !isDone(t));
@@ -578,7 +641,7 @@ function openPassword() {
    ===================================================================== */
 document.addEventListener('click', async e => {
   const nav = e.target.closest('[data-view]');
-  if (nav) { S.view = nav.dataset.view; render(); window.scrollTo(0, 0); return; }
+  if (nav) { go(nav.dataset.view); return; }
   const segBtn = e.target.closest('[data-seg] button');
   if (segBtn) {
     const n = segBtn.parentElement.dataset.seg; S.form[n] = segBtn.dataset.v;
@@ -595,12 +658,20 @@ document.addEventListener('click', async e => {
       save({ ID: t.ID, Today: !isTrue(t.Today) });
       if (a.closest('#sheet')) a.classList.toggle('on');
       break;
-    case 'donow': save({ ID: t.ID, 'Start now': isDoNow(t) ? '' : 'do now' }, isDoNow(t) ? 'Do now cleared' : 'Moving the Reclaim block to now…'); break;
+    case 'donow':
+      if (isDoNow(t)) save({ ID: t.ID, 'Start now': '' }, 'Do now cleared');
+      else if (inReclaim(t)) save({ ID: t.ID, 'Start now': 'do now', Today: true }, 'Moving the Reclaim block to now…');
+      else if (okToSend(t)) save({ ID: t.ID, Reclaim: 'YES', 'Start now': 'do now', Today: true }, 'Sent to Reclaim · it will start now');
+      break;
+    case 'reclaim':
+      if (inReclaim(t)) save({ ID: t.ID, Reclaim: 'NOT YET', 'Start now': '' }, 'Removed from Reclaim');
+      else if (okToSend(t)) save({ ID: t.ID, Reclaim: 'YES' }, 'Sent to Reclaim');
+      break;
     case 'open': openEditor(t); break;
     case 'new': openEditor(null); break;
     case 'plan': openPlan(); break;
-    case 'plan-cat': S.plan.cat = a.dataset.v; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; break;
-    case 'plan-back': S.plan.cat = null; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; break;
+    case 'plan-cat': S.plan.cat = a.dataset.v; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; pushSheet({ plan: 1, cat: a.dataset.v }); break;
+    case 'plan-back': history.back(); break;
     case 'easy-max': S.easy.max = Number(a.dataset.v); render(); break;
     case 'show-add': {
       const box = $(`#ed .inline-add[data-kind="${a.dataset.kind}"]`); box.classList.toggle('hidden');
@@ -611,7 +682,7 @@ document.addEventListener('click', async e => {
     case 'close-sheet': closeSheet(); break;
     case 'fscope': S.f.scope = a.dataset.v; render(); break;
     case 'fgoal': S.f.goal = a.dataset.v; render(); break;
-    case 'fobj': Object.assign(S.f, { obj: a.dataset.v, goal: '', scope: 'all', q: '' }); S.view = 'tasks'; render(); window.scrollTo(0, 0); break;
+    case 'fobj': Object.assign(S.f, { obj: a.dataset.v, goal: '', scope: 'all', q: '' }); if (S.view === 'tasks') render(); else go('tasks'); break;
     case 'fobj-clear': S.f.obj = ''; render(); break;
     case 'refresh': refresh(true); break;
     case 'sync': runSync(true); break;
