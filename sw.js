@@ -1,8 +1,8 @@
 // Service worker: makes the app installable and opens it instantly from cache.
 // Bump VERSION after each change you push, so phones pick up the new files.
-const VERSION = 'tt-v6';
+const VERSION = 'tt-v7';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
-  'icons/icon-192.png', 'icons/icon-512.png', 'bg/reef.svg', 'icons/logo.png'];
+  'icons/icon-192.png', 'icons/icon-512.png', 'bg/reef.svg', 'icons/logo.png', 'book.html', 'book.js', 'lib/fullcalendar.min.js'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -22,7 +22,8 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
   const isShell = url.origin === location.origin;
   const isFont = url.hostname.endsWith('fonts.googleapis.com') || url.hostname.endsWith('fonts.gstatic.com');
-  if (!isShell && !isFont) return;
+  const isLib = url.hostname === 'cdn.jsdelivr.net';      // calendar library
+  if (!isShell && !isFont && !isLib) return;
   e.respondWith(caches.open(VERSION).then(async cache => {
     const cached = await cache.match(req, { ignoreSearch: isShell });
     const fresh = fetch(req).then(res => { if (res.ok) cache.put(req, res.clone()); return res; }).catch(() => cached);

@@ -17,7 +17,7 @@
 
 const TT = {
   // Tasks/goals/categories/objectives with an EMPTY Owner belong to this account.
-  ADMIN_EMAIL: 'YOUR_EMAIL@gmail.com', // <- put your email here (in Apps Script only, not in GitHub)
+  ADMIN_EMAIL: 'aroofalinirina@gmail.com', // <- put your email here (in Apps Script only, not in GitHub)
   SESSION_DAYS: 90,
   HASH_ROUNDS: 400,
   SHEETS: { tasks: 'Tasks', goals: 'Goals', categories: 'Categories', objectives: 'Objectives', users: 'Users', ideas: 'Ideas' },
@@ -26,10 +26,10 @@ const TT = {
   BOOL_COLS: ['Today'],
   WRITABLE: ['Main goal', 'Category', 'Objective', 'Task', 'Priority', 'Energy', 'Context',
     'Scheduled date', 'Due date', 'Est hours', 'Status', 'Notes', 'Dependencies', 'Waiting on',
-    'Today', 'Reclaim', 'Start now'],
+    'Today', 'Reclaim', 'Start now', 'Auto schedule', 'Time category'],
   // Only admins may use these (your sync runs as YOU: other users' tasks
   // would otherwise land in your Google Tasks / Reclaim).
-  ADMIN_ONLY: ['Reclaim', 'Start now']
+  ADMIN_ONLY: ['Reclaim', 'Start now', 'Auto schedule', 'Time category']
 };
 
 /* =====================================================================
@@ -49,6 +49,9 @@ function doPost(e) {
 
 function tt_route_(req) {
   if (req.action === 'login') return tt_login_(req.email, req.password);
+  // public booking page (no login)
+  if (req.action === 'bookingSlots') return Object.assign({ ok: true }, bk_publicSlots_());
+  if (req.action === 'bookingRequest') return bk_request_(req.booking || {});
   const user = tt_session_(req.token);
   if (!user) return { ok: false, error: 'AUTH' };
   switch (req.action) {
@@ -67,9 +70,16 @@ function tt_route_(req) {
       return { ok: true, text: n + ' task(s) removed' + (req.alsoGoals ? ', goals removed too.' : '. Goals kept.'), data: tt_data_(user) };
     }
     case 'sync':
-      if (user.role !== 'admin') return { ok: false, error: 'Only the owner can sync with Reclaim' };
-      sendTasksToGoogleTasks(); // from your sync script
-      return { ok: true };
+    case 'schedule':
+      if (user.role !== 'admin') return { ok: false, error: 'Only the owner can use scheduling' };
+      return { ok: true, status: tt_afterChange_(req.mode || 'incremental') };
+    case 'calendar':     tt_admin_(user); return { ok: true, cal: ts_calendarData_(req.from, req.to) };
+    case 'moveBlock':    tt_admin_(user); return { ok: true, status: ts_moveBlock_(req.id, req.start, req.end) };
+    case 'unpinBlock':   tt_admin_(user); return { ok: true, status: ts_unpinBlock_(req.id) };
+    case 'settingsGet':  tt_admin_(user); return { ok: true, settings: ts_settings_(), usage: ts_usageToday_() };
+    case 'settingsSave': tt_admin_(user); ts_saveSettingsFromApp_(req.settings || {}); return { ok: true, settings: ts_settings_(), status: ts_schedule_('full', 'settings') };
+    case 'bookings':     tt_admin_(user); return { ok: true, bookings: bk_list_() };
+    case 'bookingDecide': tt_admin_(user); return Object.assign({ ok: true }, bk_decide_(req.id, !!req.accept, req.bookingUrl || ''), { bookings: bk_list_() });
     case 'password': tt_changePassword_(user, req.oldPassword, req.newPassword); return { ok: true };
     case 'logout':   PropertiesService.getScriptProperties().deleteProperty('tt_s_' + req.token); return { ok: true };
     default:         return { ok: false, error: 'Unknown action' };
@@ -254,6 +264,7 @@ function tt_data_(user) {
     categories: tt_list_(user, TT.SHEETS.categories),
     objectives: tt_list_(user, TT.SHEETS.objectives),
     ideas: tt_ideas_(user, tz),
+    sched: user.role === 'admin' ? tt_schedInfo_() : null,
     user: user,
     today: Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd'),
     serverTime: Utilities.formatDate(new Date(), tz, "yyyy-MM-dd'T'HH:mm:ss")
@@ -538,6 +549,51 @@ function tt_resetAll_(me, alsoGoals, runSync) {
       tt_deleteRows_(L.sh, L.rows.map((x, i) => ({ x, i })).filter(o => String(o.x[0]).trim() && tt_owner_(o.x[oc]) === me).map(o => o.i + 2));
     });
   } finally { lock.releaseLock(); }
-  if (runSync) { try { sendTasksToGoogleTasks(); } catch (e) {} }
+  if (runSync) { try { tt_afterChange_('incremental'); } catch (e) {} }
   return n;
+}
+
+
+/* =====================================================================
+   Scheduling glue
+   ===================================================================== */
+function tt_admin_(user) { if (user.role !== 'admin') throw new Error('Only the owner can do this'); }
+/* After a change: the new scheduler (or the old Google Tasks sync if still switched on) */
+function tt_afterChange_(mode) {
+  const s = ts_settings_();
+  if (s.reclaimSync && typeof sendTasksToGoogleTasks === 'function') { sendTasksToGoogleTasks(); return {}; }
+  return ts_schedule_(mode || 'incremental', 'app');
+}
+function tt_schedInfo_() {
+  const s = ts_settings_();
+  let pending = 0; try { pending = bk_rows_().filter(b => b.status === 'Pending' && b.end > Date.now()).length; } catch (e) {}
+  return { status: ts_status_(), categories: s.categories.map(c => ({ name: c.name, color: c.color })), goalMap: s.goalMap,
+    catMap: s.catMap, defaultCategory: s.defaultCategory, pendingBookings: pending, ready: !!s.calendarId };
+}
+/* Only the editable parts of the settings are accepted from the app */
+function ts_saveSettingsFromApp_(n) {
+  const s = ts_settings_();
+  const time = /^([01]\d|2[0-3]):[0-5]\d$/;
+  if (Array.isArray(n.categories) && n.categories.length) {
+    s.categories = n.categories.slice(0, 8).map(c => {
+      const slots = {};
+      for (let d = 0; d < 7; d++) slots[d] = ((c.slots || {})[d] || []).filter(r => time.test(r[0]) && time.test(r[1]) && r[0] < r[1]).slice(0, 6);
+      return { name: String(c.name || '').trim().slice(0, 30) || 'Time', color: /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : '#0a8f8a', slots };
+    });
+  }
+  ['goalMap', 'catMap'].forEach(k => { if (n[k] && typeof n[k] === 'object') s[k] = n[k]; });
+  if (n.defaultCategory) s.defaultCategory = String(n.defaultCategory);
+  if (n.minBlock) s.minBlock = Math.max(15, Math.min(240, Number(n.minBlock)));
+  if (n.maxBlock) s.maxBlock = Math.max(s.minBlock, Math.min(480, Number(n.maxBlock)));
+  if (n.horizonDays) s.horizonDays = Math.max(1, Math.min(14, Number(n.horizonDays)));
+  if (n.booking) {
+    const B = n.booking;
+    s.booking = Object.assign(s.booking, {
+      enabled: !!B.enabled, category: String(B.category || s.booking.category),
+      noticeHours: Math.max(0, Math.min(168, Number(B.noticeHours) || 24)), daysAhead: Math.max(1, Math.min(60, Number(B.daysAhead) || 21)),
+      durations: (B.durations || [15, 30, 60]).map(Number).filter(x => [15, 30, 45, 60, 90].indexOf(x) > -1),
+      title: String(B.title || s.booking.title).slice(0, 80), ownerName: String(B.ownerName || s.booking.ownerName).slice(0, 60)
+    });
+  }
+  ts_saveSettings_(s);
 }

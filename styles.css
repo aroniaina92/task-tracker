@@ -375,3 +375,55 @@ details.advanced[open] summary{margin-bottom:10px}
 .rs-item small{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 .group-h b,.group-h small{color:var(--page-ink);text-shadow:0 1px 6px rgba(0,30,45,.35)}
 .group-h small{opacity:.85}
+
+/* ===== Calendar page ===== */
+.nav button.has-dot{position:relative}
+.nav button.has-dot::after{content:"";position:absolute;top:4px;right:calc(50% - 16px);width:9px;height:9px;border-radius:50%;background:var(--coral);border:2px solid var(--surface)}
+.cal-bar{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+.cal-bar .seg{flex:1;background:var(--glass)}
+.cal-card{padding:8px 6px;overflow:hidden}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 4px 0;font-size:13px;color:var(--page-ink-2)}
+.lg-item{display:inline-flex;align-items:center;gap:6px}
+.lg-item i{width:12px;height:12px;border-radius:4px;display:inline-block}
+.lg-item i.busy{background:#7b8a93}.lg-item i.req{border:2px dashed var(--coral);width:10px;height:10px}
+.share{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;margin-top:14px}
+.share b{display:block}.share small{display:block;color:var(--muted);font-size:12.5px;word-break:break-all}
+.req{padding:14px 16px;margin-bottom:10px;border-left:4px solid var(--coral)}
+.req-h{display:flex;justify-content:space-between;gap:10px}.req-h span{color:var(--muted);font-weight:600}
+.req-w{margin-top:4px;font-weight:600;color:var(--accent)}
+.req-t{margin-top:6px;font-size:14px;white-space:pre-wrap}
+.req-e{margin-top:4px;font-size:13px;color:var(--muted)}
+.req-a{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap}
+.tmeta .when{color:var(--accent);font-weight:600}
+/* FullCalendar look */
+.fc{--fc-border-color:var(--line);--fc-page-bg-color:transparent;--fc-neutral-bg-color:var(--surface-2);--fc-today-bg-color:color-mix(in srgb,var(--coral) 8%,transparent);
+  --fc-now-indicator-color:var(--coral);--fc-button-bg-color:var(--surface);--fc-button-border-color:var(--line);--fc-button-text-color:var(--text);
+  --fc-button-hover-bg-color:var(--surface-2);--fc-button-hover-border-color:var(--line);--fc-button-active-bg-color:var(--accent-soft);--fc-button-active-border-color:var(--accent);
+  font-size:13px;color:var(--text)}
+.fc .fc-toolbar{margin-bottom:8px!important;gap:6px}
+.fc .fc-toolbar-title{font-size:16px;font-weight:700}
+.fc .fc-button{border-radius:10px;padding:5px 10px;font-weight:600;text-transform:capitalize;box-shadow:none!important}
+.fc .fc-timegrid-slot{height:2.1em}
+.fc .fc-col-header-cell-cushion,.fc .fc-timegrid-slot-label-cushion{color:var(--muted);font-weight:600}
+.fc .win{opacity:.11}
+.fc .ev-busy{background:#7b8a93!important;border-color:#6b7a83!important}
+.fc .ev-task{border-radius:6px;font-weight:600}
+.fc .ev-req{background:transparent!important;border:2px dashed var(--coral)!important}
+.fc .ev-req .fc-event-main{color:var(--coral)!important;font-weight:700}
+.fc-event-main{padding:1px 3px}
+
+/* ===== Settings page ===== */
+.set-cat{padding:14px 16px;margin-bottom:12px}
+.set-row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.set-name{flex:1;min-width:0;border:1.5px solid var(--line);background:var(--bg);border-radius:10px;padding:9px 12px;font-weight:700;font-size:16px}
+.set-row input[type=color]{width:44px;height:40px;border:none;background:none;padding:0}
+.set-day{display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--line)}
+.set-day:first-of-type{border-top:none}
+.set-day > span{width:40px;font-weight:600;color:var(--muted);font-size:14px;flex:none}
+.set-day > span.wide{width:auto;flex:1;color:var(--text);font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.set-day input:not([type]),.set-day select{flex:1;min-width:0;border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:8px 10px;font-size:14.5px}
+.set-day select{flex:0 1 auto;max-width:55%}
+.set-box{padding:10px 16px}
+.set-sum{cursor:pointer;font-weight:600;padding:6px 0;color:var(--muted)}
+.durs{display:flex;gap:10px;flex-wrap:wrap;font-size:14px}
+.durs label{display:inline-flex;gap:4px;align-items:center}

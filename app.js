@@ -50,8 +50,25 @@ const lead = s => (String(s ?? '').match(/^[^\p{L}\p{N}]+/u) || [''])[0].replace
 const d10 = v => String(v || '').slice(0, 10);
 const isDone = t => t.Status === 'Completed';
 const isTrue = v => v === true || String(v).toUpperCase() === 'TRUE';
-const inReclaim = t => String(t.Reclaim || '').trim().toUpperCase() === 'YES';
-const isDoNow = t => String(t['Start now'] || '').trim().toLowerCase() === 'do now';
+const SCH = () => (S.data && S.data.sched) || null;
+const SST = () => (SCH() && SCH().status) || {};
+const isScheduled = t => String(t['Auto schedule'] || '').trim().toUpperCase() === 'YES';
+const isDoNow = t => String(t['Start now'] || '').trim().toLowerCase() === 'do now' || (SST().doingNow || []).includes(String(t.ID));
+const nextBlock = t => (SST().next || {})[t.ID] || null;
+const isAtRisk = t => (SST().atRisk || []).includes(String(t.ID));
+const isOverTime = t => (SST().overTime || []).includes(String(t.ID));
+// time category of a task: its own, else its category's, else its goal's, else the default
+function timeCat(t) {
+  const sc = SCH(); if (!sc) return null;
+  const name = t['Time category'] || (sc.catMap || {})[t.Category] || (sc.goalMap || {})[t['Main goal']] || sc.defaultCategory;
+  return sc.categories.find(c => c.name === name) || sc.categories[0] || null;
+}
+function niceWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso), day = d.toISOString ? iso.slice(0, 10) : '', n = dayDiff(day, today());
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  return (n === 0 ? 'today' : n === 1 ? 'tomorrow' : d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })) + ' ' + hm;
+}
 const isAdmin = () => S.user && S.user.role === 'admin';
 // Put `prefix` emojis in front of a name: withPrefix('🔰', '📋 Questionnaire') -> '🔰📋 Questionnaire'
 function withPrefix(prefix, text) {
@@ -62,7 +79,8 @@ function withPrefix(prefix, text) {
   return rest ? emo + ' ' + rest : emo;
 }
 function okToSend(t) {
-  return hrs(t) > 0 || confirm('This task has no hours, so Reclaim will use its default duration. Send anyway?');
+  if (hrs(t) > 0) return true;
+  toast('Add estimated hours first, so the scheduler knows how much time to plan'); openEditor(t); return false;
 }
 const hrs = t => Number(t['Est hours']) || 0;
 const today = () => S.data.today;
@@ -128,6 +146,11 @@ function card(t, opts = {}) {
     else if (due) m.push(`<span>Due ${niceDate(due)}</span>`);
     if (hrs(t)) m.push(`<span>${hrs(t)} h</span>`); else m.push('<span class="nohrs">no hours</span>');
     if (t.Energy) { const e = Math.min(5, Number(t.Energy) || 0); m.push(`<span class="energy" title="Energy ${e}/5">${'<b>●</b>'.repeat(e)}${'<i>●</i>'.repeat(5 - e)}</span>`); }
+    if (isAdmin() && isScheduled(t)) {
+      if (isOverTime(t)) m.push('<span class="wait">⏱ planned time used, add hours or tick ✓</span>');
+      else if (nextBlock(t)) m.push(`<span class="when">📅 ${esc(niceWhen(nextBlock(t)))}</span>`);
+      if (isAtRisk(t)) m.push('<span class="over">⚠ at risk</span>');
+    }
     if (blockers(t).length) m.push('<span class="wait">⛓ waiting on a task</span>');
     if (t['Waiting on']) m.push(`<span class="wait">⏳ ${esc(t['Waiting on'])}</span>`);
   } else if (t['Completed on']) m.push(`<span>Done ${niceDate(t['Completed on'])}</span>`);
@@ -136,7 +159,7 @@ function card(t, opts = {}) {
   if (!isDone(t)) {
     side.push(`<button class="ibtn sun ${isTrue(t.Today) ? 'on' : ''}" data-act="today" aria-label="Plan for today" title="Plan for today">☀️</button>`);
     if (isAdmin()) {
-      acts.push(`<button class="pill ${inReclaim(t) ? 'on' : ''}" data-act="reclaim" aria-pressed="${inReclaim(t)}">📅 ${inReclaim(t) ? 'In Reclaim' : 'Send to Reclaim'}</button>`);
+      acts.push(`<button class="pill ${isScheduled(t) ? 'on' : ''}" data-act="sched" aria-pressed="${isScheduled(t)}">📅 ${isScheduled(t) ? 'Scheduled' : 'Schedule'}</button>`);
       acts.push(`<button class="pill now ${isDoNow(t) ? 'on' : ''}" data-act="donow" aria-pressed="${isDoNow(t)}">▶ ${isDoNow(t) ? 'Doing now' : 'Do now'}</button>`);
     }
   }
@@ -213,7 +236,9 @@ function viewHome() {
           <div class="pct">${pct}%</div></div>
         <div><div class="big">${B.doneToday.length} of ${total} tasks done</div>
           <div class="small">${hAll ? `${hDone.toFixed(1)} of ${hAll.toFixed(1)} h` : 'No hours estimated yet'}</div>
-          <div class="badges">${st ? `<span class="badge hot">🔥 ${st}-day streak</span>` : ''}${B.overdue.length ? `<span class="badge">${B.overdue.length} overdue</span>` : ''}</div></div>
+          <div class="badges">${st ? `<span class="badge hot">🔥 ${st}-day streak</span>` : ''}${B.overdue.length ? `<span class="badge">${B.overdue.length} overdue</span>` : ''}
+            ${(SST().atRisk || []).length ? `<span class="badge">⚠ ${SST().atRisk.length} at risk</span>` : ''}
+            ${SCH() && SCH().pendingBookings ? `<button class="badge hot" data-view="calendar">📩 ${SCH().pendingBookings} meeting request${SCH().pendingBookings > 1 ? 's' : ''}</button>` : ''}</div></div>
       </div>
       ${REEF_ART}
     </section>
@@ -244,7 +269,12 @@ function setTaskFilter(key, val, noRender) {
   if (key === 'obj' && val) { const o = S.data.objectives.find(x => x.Name === val); if (o) { f.cat = o.Category; const c = catOrder().find(x => x.name === o.Category); if (c && c.goal) f.goal = c.goal; } }
   if (!noRender) render();
 }
+function tasksTabs() {
+  const tab = (k, l) => `<button type="button" data-act="ttab" data-v="${k}" aria-pressed="${(S.tasksTab || 'all') === k}">${l}</button>`;
+  return `<div class="seg ptabs">${tab('all', 'All tasks')}${tab('easy', '🌊 Easy (low energy)')}</div>`;
+}
 function viewTasks() {
+  if (S.tasksTab === 'easy') return pageTop('Tasks') + tasksTabs() + viewEasy(true);
   const f = S.f, arr = filtered(), groups = new Map();
   sortTasks(arr).forEach(t => { const k = t.Objective || 'No objective'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
   const chip = (lbl, on, act, val) => `<button class="chip" aria-pressed="${on}" data-act="${act}" data-v="${esc(val)}">${esc(lbl)}</button>`;
@@ -254,7 +284,7 @@ function viewTasks() {
   const sel = (key, label, list, val) => { const all = list.slice(); if (val && !all.includes(val)) all.push(val);
     return `<select class="fsel ${val ? 'on' : ''}" data-ff="${key}" aria-label="${label}"><option value="">${label}</option>${all.map(x => `<option ${x === val ? 'selected' : ''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select>`; };
   const any = f.goal || f.cat || f.obj;
-  return `${pageTop('Tasks')}
+  return `${pageTop('Tasks')}${tasksTabs()}
     <div class="toolbar"><input class="search" type="search" placeholder="Search tasks" value="${esc(f.q)}" data-f="q" aria-label="Search tasks">
       <div class="chips">${chip('Open', f.scope === 'open', 'fscope', 'open')}${chip('Done', f.scope === 'done', 'fscope', 'done')}${chip('All', f.scope === 'all', 'fscope', 'all')}
         ${any ? '<button class="chip filter" data-act="fclear">Clear filters ✕</button>' : ''}</div>
@@ -306,7 +336,7 @@ function catOrder() {
   D.tasks.forEach(t => { if (t.Category && !out.some(o => o.name === t.Category)) out.push({ name: t.Category, goal: t['Main goal'] }); });
   return out;
 }
-function viewEasy() {
+function viewEasy(inTasks) {
   const E = S.easy, q = norm(E.q);
   const open = S.data.tasks.filter(t => !isDone(t));
   const pool = open.filter(t => Number(t.Energy) > 0 && Number(t.Energy) <= E.max &&
@@ -315,7 +345,7 @@ function viewEasy() {
   const groups = catOrder().map(c => ({ c, ts: sortTasks(pool.filter(t => t.Category === c.name)).sort((a, b) => Number(a.Energy) - Number(b.Energy)) }))
     .filter(g => g.ts.length);
   const segBtn = (v, l) => `<button type="button" data-act="easy-max" data-v="${v}" aria-pressed="${E.max === v}">${l}</button>`;
-  return `${pageTop('Easy tasks')}
+  return `${inTasks ? '' : pageTop('Easy tasks')}
     <p class="psub">Low-energy tasks for tired moments, grouped by category.</p>
     <div class="toolbar"><input class="search" type="search" placeholder="Search easy tasks" value="${esc(E.q)}" data-f="easyq" aria-label="Search easy tasks">
       <div class="field" style="margin:12px 0 0">Energy up to<div class="seg">${segBtn(1, '1 · very easy')}${segBtn(2, '≤ 2')}${segBtn(3, '≤ 3')}</div></div></div>
@@ -459,6 +489,180 @@ async function doReset(kind, btn) {
 }
 
 /* =====================================================================
+   Calendar (owner): Google Calendar + "My Steps" task blocks + meeting requests
+   ===================================================================== */
+let calCache = {};
+const bookingLink = () => location.origin + location.pathname.replace(/[^/]*$/, '') + 'book.html';
+function viewCalendar() {
+  if (!isAdmin()) return `${pageTop('Calendar')}<div class="empty">The calendar and automatic scheduling are only available to the owner's account.</div>`;
+  if (!SCH() || !SCH().ready) return `${pageTop('Calendar')}<div class="empty">Scheduling is not set up yet.<br>Run <b>ttSetupScheduler</b> once in Apps Script (see the setup guide).</div>`;
+  const v = S.calView || (innerWidth < 700 ? 'timeGridDay' : 'timeGridWeek');
+  const tab = (k, l) => `<button type="button" data-act="cal-view" data-v="${k}" aria-pressed="${v === k}">${l}</button>`;
+  const legend = SCH().categories.map(c => `<span class="lg-item"><i style="background:${esc(c.color)}"></i>${esc(c.name)}</span>`).join('') +
+    '<span class="lg-item"><i class="busy"></i>Busy</span><span class="lg-item"><i class="req"></i>Request</span>';
+  const st = SST();
+  return `${pageTop('Calendar')}
+    <div id="reqs">${reqsHTML()}</div>
+    <div class="cal-bar"><div class="seg">${tab('timeGridDay', 'Day')}${tab('timeGrid3', '3 days')}${tab('timeGridWeek', 'Week')}</div>
+      <button class="btn small" data-act="sync" title="Re-plan">↻ Re-plan</button></div>
+    <div class="card cal-card"><div id="fc"></div></div>
+    <div class="legend">${legend}</div>
+    <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) + ' · ' : ''}Drag a task block to move it: it stays where you put it (📌). Tap it to open the task.</p>
+    <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
+      <button class="btn small" data-act="copy-link">Copy link</button></div>`;
+}
+function reqsHTML() {
+  const list = (S.bookings || []).filter(b => b.status === 'Pending');
+  if (!list.length) return '';
+  return `<div class="sec-h" style="margin-top:4px"><h2>Meeting requests <span class="n">${list.length}</span></h2></div>` + list.map(b => `
+    <div class="card req" data-bid="${esc(b.id)}"><div class="req-h"><b>${esc(b.name)}</b><span>${b.minutes} min</span></div>
+      <div class="req-w">📅 ${esc(niceWhen(b.start))}</div>${b.topic ? `<div class="req-t">${esc(b.topic)}</div>` : ''}
+      <div class="req-e">${esc(b.email)}</div>
+      <div class="req-a"><button class="btn small" data-act="bk-decline">Decline</button><button class="btn primary small" data-act="bk-accept">Accept + send Meet link</button></div></div>`).join('');
+}
+async function loadBookings() {
+  try { const r = await api('bookings'); S.bookings = r.bookings; const el = $('#reqs'); if (el) el.innerHTML = reqsHTML(); } catch (e) {}
+}
+function catColorOf(taskId) { const t = S.data.tasks.find(x => String(x.ID) === String(taskId)); const c = t && timeCat(t); return c ? c.color : '#0a8f8a'; }
+async function loadCal(info) {
+  const key = info.startStr + '|' + info.endStr;
+  if (!calCache[key]) calCache[key] = api('calendar', { from: info.start.toISOString(), to: info.end.toISOString() }).then(r => r.cal);
+  let cal;
+  try { cal = await calCache[key]; } catch (e) { delete calCache[key]; throw e; }
+  const ev = [];
+  cal.windows.forEach(w => ev.push({ start: w.start, end: w.end, display: 'background', backgroundColor: w.color, classNames: ['win'] }));
+  cal.main.forEach(m => ev.push({ title: m.title, start: m.start, end: m.end, allDay: m.allDay, editable: false, classNames: ['ev-busy'], extendedProps: { kind: 'busy' } }));
+  cal.blocks.forEach(b => { const c = catColorOf(b.taskId);
+    ev.push({ id: b.id, title: (b.pinned ? '📌 ' : '') + b.title, start: b.start, end: b.end, editable: true, backgroundColor: c, borderColor: c,
+      classNames: ['ev-task'], extendedProps: { kind: 'task', taskId: b.taskId, pinned: b.pinned } }); });
+  (cal.bookings || []).filter(b => b.status === 'Pending').forEach(b => ev.push({ title: '⏳ ' + b.name + ' (' + b.minutes + ' min)', start: b.start, end: b.end,
+    editable: false, classNames: ['ev-req'], extendedProps: { kind: 'booking', id: b.id } }));
+  return ev;
+}
+let fcTries = 0;
+function mountCalendar() {
+  const el = $('#fc'); if (!el) return;
+  if (!window.FullCalendar) {
+    if (fcTries++ < 40) { setTimeout(() => S.view === 'calendar' && mountCalendar(), 250); }
+    else el.innerHTML = '<div class="empty">The calendar could not load. Check your connection.</div>';
+    return;
+  }
+  fcTries = 0;
+  if (S.fc) { try { S.fc.destroy(); } catch (e) {} }
+  const move = info => {
+    syncing(true, 'Moving…');
+    api('moveBlock', { id: info.event.id, start: info.event.start.toISOString(), end: info.event.end.toISOString() })
+      .then(() => { calCache = {}; S.fc && S.fc.refetchEvents(); toast('Moved and pinned 📌'); return refresh(false); })
+      .catch(e => { info.revert(); toast('Not moved: ' + e.message); })
+      .finally(() => syncing(false));
+  };
+  S.fc = new FullCalendar.Calendar(el, {
+    initialView: S.calView || (innerWidth < 700 ? 'timeGridDay' : 'timeGridWeek'),
+    initialDate: S.calDate || undefined,
+    views: { timeGrid3: { type: 'timeGrid', duration: { days: 3 } } },
+    headerToolbar: { left: 'prev,next', center: 'title', right: 'today' },
+    firstDay: 1, height: 'auto', slotMinTime: '04:00:00', slotMaxTime: '22:00:00', slotDuration: '00:30:00',
+    nowIndicator: true, allDaySlot: true, eventMinHeight: 18, snapDuration: '00:15:00', longPressDelay: 350,
+    slotLabelFormat: { hour: '2-digit', minute: '2-digit', hour12: false }, eventTimeFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
+    eventSources: [{ events: (info, ok, fail) => { loadCal(info).then(ok).catch(e => { toast('Calendar: ' + e.message); fail(e); }); } }],
+    eventDrop: move, eventResize: move,
+    eventClick: info => {
+      const k = info.event.extendedProps.kind;
+      if (k === 'task') { const t = S.data.tasks.find(x => String(x.ID) === String(info.event.extendedProps.taskId)); if (t) openEditor(t); }
+      else if (k === 'booking') { const r = $(`[data-bid="${info.event.extendedProps.id}"]`); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      else toast(info.event.title);
+    },
+    datesSet: info => { S.calDate = info.view.currentStart; S.calView = info.view.type; }
+  });
+  S.fc.render();
+}
+async function decideBooking(id, accept) {
+  const b = (S.bookings || []).find(x => x.id === id); if (!b) return;
+  if (!confirm(accept ? `Accept ${b.name} (${b.minutes} min, ${niceWhen(b.start)})? A Google Meet link will be emailed.` : `Decline ${b.name}'s request? They will get a polite email.`)) return;
+  syncing(true, accept ? 'Accepting…' : 'Declining…');
+  try {
+    const r = await api('bookingDecide', { id, accept, bookingUrl: bookingLink() });
+    S.bookings = r.bookings; calCache = {}; render(); toast(accept ? 'Accepted · invitation sent' : 'Declined · email sent'); refresh(false);
+  } catch (e) { toast('Not done: ' + e.message); } finally { syncing(false); }
+}
+
+/* =====================================================================
+   Scheduling & booking settings (owner)
+   ===================================================================== */
+const DAYS = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
+const rangesText = r => (r || []).map(x => x[0] + '–' + x[1]).join(', ');
+function parseRanges(txt) {
+  const out = [], bad = [];
+  String(txt || '').split(/[,;]+/).map(x => x.trim()).filter(Boolean).forEach(part => {
+    const m = part.replace(/h/gi, ':').replace(/\s/g, '').match(/^(\d{1,2})(?::(\d{2}))?[-–](\d{1,2})(?::(\d{2}))?$/);
+    if (!m) { bad.push(part); return; }
+    const a = String(m[1]).padStart(2, '0') + ':' + (m[2] || '00'), b = String(m[3]).padStart(2, '0') + ':' + (m[4] || '00');
+    if (a >= b || +m[1] > 23 || +m[3] > 24) { bad.push(part); return; }
+    out.push([a, b === '24:00' ? '23:59' : b]);
+  });
+  return { out, bad };
+}
+function viewSched() {
+  if (!isAdmin()) return `${pageTop('Scheduling')}<div class="empty">Only the owner can change these settings.</div>`;
+  const s = S.settings;
+  if (!s) { api('settingsGet').then(r => { S.settings = r.settings; S.usage = r.usage; if (S.view === 'sched') render(); }).catch(e => toast(e.message)); return `${pageTop('Scheduling')}<div class="skel"></div><div class="skel"></div>`; }
+  const catOpts = (val, blank) => (blank ? `<option value="">${blank}</option>` : '') + s.categories.map(c => `<option ${c.name === val ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  const cats = s.categories.map((c, i) => `<div class="card set-cat" data-ci="${i}">
+      <div class="set-row"><input class="set-name" data-k="name" value="${esc(c.name)}" aria-label="Name"><input type="color" data-k="color" value="${esc(c.color)}" aria-label="Colour">
+        ${s.categories.length > 1 ? `<button class="ibtn" data-act="set-delcat" data-v="${i}" aria-label="Remove">✕</button>` : ''}</div>
+      ${DAYS.map(([d, l]) => `<label class="set-day"><span>${l}</span><input data-day="${d}" value="${esc(rangesText(c.slots[d]))}" placeholder="off"></label>`).join('')}
+    </div>`).join('');
+  const goals = S.data.goals.map(g => `<label class="set-day"><span class="wide">${esc(g.Name)}</span><select data-goal="${esc(g.Name)}">${catOpts(s.goalMap[g.Name] || s.defaultCategory)}</select></label>`).join('');
+  const catOver = catOrder().map(c => `<label class="set-day"><span class="wide">${esc(c.name)}</span><select data-catmap="${esc(c.name)}">${catOpts(s.catMap[c.name] || '', 'Same as goal')}</select></label>`).join('');
+  const B = s.booking, u = S.usage || {};
+  const sel = (k, list, val, unit) => `<select data-n="${k}">${list.map(x => `<option value="${x}" ${Number(val) === x ? 'selected' : ''}>${x} ${unit}</option>`).join('')}</select>`;
+  return `${pageTop('Scheduling')}
+    <p class="psub">Hours for each time category. Write times like <b>08:30-12:30, 14:30-17:30</b> (8h30-12h30 works too). Leave a day empty for "off".</p>
+    ${cats}<button class="btn block" data-act="set-addcat" style="margin-bottom:22px">+ Add a time category</button>
+    <div class="sec-h"><h2>Goals → time category</h2></div><div class="card set-box">${goals || '<p class="note">No goals yet.</p>'}</div>
+    <details class="card set-box" style="margin-top:10px"><summary class="set-sum">Per category (optional)</summary>${catOver}</details>
+    <div class="sec-h"><h2>Blocks</h2></div><div class="card set-box">
+      <label class="set-day"><span class="wide">Shortest block</span>${sel('minBlock', [15, 30, 45, 60], s.minBlock, 'min')}</label>
+      <label class="set-day"><span class="wide">Longest block</span>${sel('maxBlock', [60, 90, 120, 180, 240], s.maxBlock, 'min')}</label>
+      <label class="set-day"><span class="wide">Plan ahead</span>${sel('horizonDays', [3, 5, 7, 10, 14], s.horizonDays, 'days')}</label></div>
+    <div class="sec-h"><h2>Booking page</h2></div><div class="card set-box">
+      <label class="switch"><span>Accept meeting requests</span><input type="checkbox" data-b="enabled" ${B.enabled ? 'checked' : ''}></label>
+      <label class="set-day"><span class="wide">Bookable hours</span><select data-b="category">${catOpts(B.category)}</select></label>
+      <label class="set-day"><span class="wide">Minimum notice</span><select data-b="noticeHours">${[4, 12, 24, 48].map(x => `<option value="${x}" ${B.noticeHours === x ? 'selected' : ''}>${x} h</option>`).join('')}</select></label>
+      <label class="set-day"><span class="wide">How far ahead</span><select data-b="daysAhead">${[7, 14, 21, 28].map(x => `<option value="${x}" ${B.daysAhead === x ? 'selected' : ''}>${x} days</option>`).join('')}</select></label>
+      <div class="set-day"><span class="wide">Lengths</span><span class="durs">${[15, 30, 45, 60, 90].map(x => `<label><input type="checkbox" data-dur="${x}" ${B.durations.includes(x) ? 'checked' : ''}> ${x}</label>`).join('')}</span></div>
+      <label class="field"><span class="lab">Your name on the page</span><input data-b="ownerName" value="${esc(B.ownerName)}"></label>
+      <label class="field"><span class="lab">Meeting title</span><input data-b="title" value="${esc(B.title)}"></label>
+      <div class="share"><div><b>Link</b><small>${esc(bookingLink())}</small></div><button class="btn small" data-act="copy-link">Copy</button></div></div>
+    <p class="note">Today: ${u.runs || 0} scheduler runs · ${Math.round((u.seconds || 0) / 60)} min · ${u.writes || 0} calendar changes.</p>
+    <button class="btn primary block" data-act="set-save" style="margin-top:8px">Save and re-plan</button>`;
+}
+function collectSettings() {
+  const s = JSON.parse(JSON.stringify(S.settings)), bad = [];
+  document.querySelectorAll('.set-cat').forEach(box => {
+    const c = s.categories[Number(box.dataset.ci)];
+    c.name = box.querySelector('[data-k="name"]').value.trim() || c.name;
+    c.color = box.querySelector('[data-k="color"]').value;
+    box.querySelectorAll('[data-day]').forEach(inp => { const r = parseRanges(inp.value); c.slots[inp.dataset.day] = r.out; r.bad.forEach(b => bad.push(c.name + ' ' + b)); });
+  });
+  document.querySelectorAll('[data-goal]').forEach(x => { s.goalMap[x.dataset.goal] = x.value; });
+  s.catMap = {}; document.querySelectorAll('[data-catmap]').forEach(x => { if (x.value) s.catMap[x.dataset.catmap] = x.value; });
+  document.querySelectorAll('[data-n]').forEach(x => { s[x.dataset.n] = Number(x.value); });
+  document.querySelectorAll('[data-b]').forEach(x => { s.booking[x.dataset.b] = x.type === 'checkbox' ? x.checked : (/^(noticeHours|daysAhead)$/.test(x.dataset.b) ? Number(x.value) : x.value); });
+  s.booking.durations = [...document.querySelectorAll('[data-dur]:checked')].map(x => Number(x.dataset.dur));
+  return { s, bad };
+}
+async function saveSettings(btn) {
+  const { s, bad } = collectSettings();
+  if (bad.length) return toast('Check these times: ' + bad.slice(0, 3).join(' · '));
+  if (s.minBlock > s.maxBlock) return toast('The shortest block is longer than the longest block');
+  if (!s.booking.durations.length) return toast('Choose at least one meeting length');
+  btn.disabled = true; syncing(true, 'Saving…');
+  try { const r = await api('settingsSave', { settings: s }); S.settings = r.settings; calCache = {}; await refresh(false); toast('Saved · schedule updated'); }
+  catch (e) { toast('Not saved: ' + e.message); } finally { btn.disabled = false; syncing(false); }
+}
+
+/* =====================================================================
    Me
    ===================================================================== */
 function viewMe() {
@@ -468,7 +672,7 @@ function viewMe() {
     <div class="card me-h"><div class="avatar">${esc((u.name || u.email || '?').trim()[0].toUpperCase())}</div>
       <div><div style="font-weight:700">${esc(u.name || '')}</div><div class="note" style="margin:0">${esc(u.email)}${isAdmin() ? ' · owner' : ''}</div></div></div>
     <div class="card menu">
-      ${isAdmin() ? '<button data-act="sync">Sync with Google Tasks / Reclaim now <small>›</small></button>' : ''}
+      ${isAdmin() ? '<button data-view="sched">Scheduling & booking settings <small>›</small></button><button data-act="sync">Re-plan my schedule now <small>›</small></button>' : ''}
       <button data-act="refresh">Reload from the sheet <small>${last ? 'last ' + new Date(last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</small></button>
       <button data-act="theme">Theme <small>${theme === 'auto' ? 'Automatic' : theme === 'dark' ? 'Dark' : 'Light'}</small></button>
       <button data-act="password">Change password <small>›</small></button>
@@ -520,12 +724,15 @@ function logout(expired) {
 /* =====================================================================
    Render & data flow
    ===================================================================== */
-const VIEWS = { home: viewHome, tasks: viewTasks, easy: viewEasy, ideas: viewIdeas, projects: viewProjects, me: viewMe };
+const VIEWS = { home: viewHome, tasks: viewTasks, easy: viewEasy, calendar: viewCalendar, sched: viewSched, ideas: viewIdeas, projects: viewProjects, me: viewMe };
 function render() {
   if (!S.data) { $('#app').innerHTML = '<div class="page">' + '<div class="skel"></div>'.repeat(4) + '</div>'; return; }
   const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : null;
   $('#app').innerHTML = `<main class="page">${VIEWS[S.view]()}</main>`;
-  document.querySelectorAll('#nav [data-view]').forEach(b => b.setAttribute('aria-current', b.dataset.view === S.view));
+  document.querySelectorAll('#nav [data-view]').forEach(b => b.setAttribute('aria-current', b.dataset.view === S.view || (b.dataset.view === 'tasks' && S.view === 'easy')));
+  const dot = document.querySelector('#nav [data-view="calendar"]'); if (dot) dot.classList.toggle('has-dot', !!(SCH() && SCH().pendingBookings));
+  if (S.view === 'calendar' && isAdmin() && SCH() && SCH().ready) { mountCalendar(); if (!S.bookingsLoaded) { S.bookingsLoaded = true; loadBookings(); } }
+  else if (S.fc) { try { S.fc.destroy(); } catch (e) {} S.fc = null; }
   if (focus) { const i = $(`[data-f="${focus}"]`); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
 }
 function setData(d) { S.data = d; store.set('tt_cache_' + S.user.email, d); store.set('tt_last_' + S.user.email, Date.now()); }
@@ -555,15 +762,23 @@ async function save(partial, msg) {
   try {
     const r = await api('save', { task: partial }); setData(r.data); render(); if (msg) toast(msg);
     const after = S.data.tasks.find(x => x.ID === (partial.ID || '')) || partial;
-    if (isAdmin() && ('Reclaim' in partial || 'Start now' in partial || inReclaim(after))) runSync(false);
+    const touches = ['Auto schedule', 'Start now', 'Status', 'Est hours', 'Due date', 'Priority', 'Time category', 'Main goal', 'Category'].some(k => k in partial);
+    if (isAdmin() && touches && (isScheduled(after) || 'Auto schedule' in partial)) runSchedule(false);
   } catch (e) { toast('Not saved: ' + e.message); refresh(false); }
   finally { syncing(false); }
 }
-function runSync(loud) {
-  if (loud) syncing(true, 'Syncing with Reclaim…');
-  api('sync').then(() => { if (loud) toast('Synced with Google Tasks'); })
-    .catch(e => { if (loud) toast('Sync failed: ' + e.message); })
-    .finally(() => { if (loud) syncing(false); });
+// Ask the server to (re)plan; the screen is already updated, this only brings back the new times
+let schedBusy = null;
+function runSchedule(loud, mode) {
+  if (schedBusy && !loud) { schedBusy.again = true; return schedBusy; }
+  if (loud) syncing(true, mode === 'full' ? 'Re-planning…' : 'Scheduling…');
+  const job = schedBusy = { again: false };
+  job.p = api('schedule', { mode: mode || 'incremental' })
+    .then(() => { calCache = {}; return refresh(false); })
+    .then(() => { if (loud) toast('Schedule updated'); if (S.view === 'calendar' && S.fc) S.fc.refetchEvents(); })
+    .catch(e => { if (loud) toast('Scheduling failed: ' + e.message); })
+    .finally(() => { if (loud) syncing(false); schedBusy = null; if (job.again) runSchedule(false); });
+  return job;
 }
 
 /* =====================================================================
@@ -672,9 +887,11 @@ function openEditor(t, preset) {
       <label class="field"><span class="lab">Status</span>${selectHTML('Status', statuses(), t ? t.Status : openStatus(), '—').replace('<option value="">—</option>', '')}</label></div>
       ${fieldReq('Priority', 'Priority', seg('Priority', [['Low', 'Low'], ['Medium', 'Medium'], ['High', 'High']], S.form.Priority))}
       ${fieldReq('Energy (1 easy → 5 demanding)', 'Energy', seg('Energy', [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [5, '5']], S.form.Energy))}</div>
-    ${isAdmin() ? `<div class="fs"><div class="lg">Reclaim</div>
-      <label class="switch"><span>Send to Reclaim<small>Goes to Google Tasks and gets scheduled in your calendar</small></span><input type="checkbox" name="Reclaim" ${t && inReclaim(t) ? 'checked' : ''}></label>
-      <label class="switch"><span>▶ Do now<small>Moves its Reclaim block to start now</small></span><input type="checkbox" name="Start now" ${t && isDoNow(t) ? 'checked' : ''}></label></div>` : ''}
+    ${isAdmin() && SCH() ? `<div class="fs"><div class="lg">Scheduling</div>
+      <label class="switch"><span>📅 Schedule automatically<small>Gets time blocks in your "My Steps" calendar, by priority and due date</small></span><input type="checkbox" name="Auto schedule" ${t && isScheduled(t) ? 'checked' : ''}></label>
+      <label class="field"><span class="lab">Time category</span><select name="Time category"><option value="">Default (from goal${t && timeCat(t) && !t['Time category'] ? ': ' + esc(timeCat(t).name) : ''})</option>
+        ${SCH().categories.map(c => `<option ${t && t['Time category'] === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <label class="switch"><span>▶ Do now<small>Starts a block right now and moves the others later</small></span><input type="checkbox" name="Start now" ${t && isDoNow(t) ? 'checked' : ''}></label></div>` : ''}
     <div class="fs"><div class="lg">Details</div>
       <label class="field"><span class="lab">Context</span><input name="Context" list="ctxL" value="${v('Context')}"></label>
       <label class="field"><span class="lab">Depends on</span><input name="Dependencies" list="depL" value="${v('Dependencies')}" placeholder="Another task (optional)"></label>
@@ -755,9 +972,12 @@ async function saveEditor() {
     if (!t) return toast('Please fill: ' + txt);
     if (!p.Task || !confirm('Still empty: ' + txt + '. Save anyway?')) return;
   }
-  if (isAdmin()) {
-    p.Reclaim = f.Reclaim.checked ? 'YES' : 'NOT YET';
-    p['Start now'] = f.Reclaim.checked && f['Start now'].checked ? 'do now' : '';
+  if (isAdmin() && f['Auto schedule']) {
+    const now = f['Start now'].checked;
+    p['Auto schedule'] = f['Auto schedule'].checked || now ? 'YES' : '';
+    p['Time category'] = f['Time category'].value;
+    if (now && !(t && isDoNow(t))) p['Start now'] = 'do now';
+    if (!now && t && String(t['Start now'] || '').toLowerCase() === 'do now') p['Start now'] = '';
   }
   if (!t && p.Objective) p.Task = withPrefix(lead(p.Objective), p.Task);
   if (!t) store.set('tt_lastentry_' + S.user.email, { goal: p['Main goal'], cat: p.Category, obj: p.Objective });
@@ -765,7 +985,7 @@ async function saveEditor() {
   if (t) { p.ID = t.ID; await save(p, 'Saved'); }
   else {
     syncing(true, 'Saving…');
-    try { const r = await api('save', { task: p }); setData(r.data); render(); toast('Task added'); if (isAdmin() && p.Reclaim === 'YES') runSync(false); }
+    try { const r = await api('save', { task: p }); setData(r.data); render(); toast('Task added'); if (isAdmin() && p['Auto schedule'] === 'YES') runSchedule(false); }
     catch (e) { toast('Not saved: ' + e.message); } finally { syncing(false); }
   }
 }
@@ -841,13 +1061,12 @@ document.addEventListener('click', async e => {
       if (a.closest('#sheet')) a.classList.toggle('on');
       break;
     case 'donow':
-      if (isDoNow(t)) save({ ID: t.ID, 'Start now': '' }, 'Do now cleared');
-      else if (inReclaim(t)) save({ ID: t.ID, 'Start now': 'do now', Today: true }, 'Moving the Reclaim block to now…');
-      else if (okToSend(t)) save({ ID: t.ID, Reclaim: 'YES', 'Start now': 'do now', Today: true }, 'Sent to Reclaim · it will start now');
+      if (isDoNow(t)) { toast('Already in progress · tap ✓ when it is finished'); break; }
+      if (okToSend(t)) save({ ID: t.ID, 'Auto schedule': 'YES', 'Start now': 'do now', Today: true }, 'Starting now · other blocks move later');
       break;
-    case 'reclaim':
-      if (inReclaim(t)) save({ ID: t.ID, Reclaim: 'NOT YET', 'Start now': '' }, 'Removed from Reclaim');
-      else if (okToSend(t)) save({ ID: t.ID, Reclaim: 'YES' }, 'Sent to Reclaim');
+    case 'sched':
+      if (isScheduled(t)) save({ ID: t.ID, 'Auto schedule': '', 'Start now': '' }, 'Removed from the schedule');
+      else if (okToSend(t)) save({ ID: t.ID, 'Auto schedule': 'YES' }, 'Scheduling…');
       break;
     case 'open': openEditor(t); break;
     case 'new': openEditor(null); break;
@@ -855,6 +1074,14 @@ document.addEventListener('click', async e => {
     case 'plan-cat': S.plan.cat = a.dataset.v; $('#sheetBody').innerHTML = planBody(); $('#sheetBody').scrollTop = 0; pushSheet({ plan: 1, cat: a.dataset.v }); break;
     case 'plan-back': history.back(); break;
     case 'ptab': S.ptab = a.dataset.v; render(); break;
+    case 'ttab': S.tasksTab = a.dataset.v; render(); break;
+    case 'cal-view': S.calView = a.dataset.v; if (S.fc) { S.fc.changeView(a.dataset.v); a.parentElement.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', b === a)); } break;
+    case 'bk-accept': decideBooking(a.closest('[data-bid]').dataset.bid, true); break;
+    case 'bk-decline': decideBooking(a.closest('[data-bid]').dataset.bid, false); break;
+    case 'copy-link': (navigator.clipboard ? navigator.clipboard.writeText(bookingLink()) : Promise.reject()).then(() => toast('Booking link copied')).catch(() => prompt('Copy this link:', bookingLink())); break;
+    case 'set-addcat': { const { s: cur } = collectSettings(); cur.categories.push({ name: 'New time', color: '#e0a100', slots: {} }); S.settings = cur; render(); break; }
+    case 'set-delcat': { const { s: cur } = collectSettings(); const i = Number(a.dataset.v); if (!confirm('Remove "' + cur.categories[i].name + '"?')) break; cur.categories.splice(i, 1); S.settings = cur; render(); break; }
+    case 'set-save': saveSettings(a); break;
     case 'idea-add': {
       const box = $('#ideaNew'), text = box.value.trim(); if (!text) { box.focus(); return toast('Write your idea first'); }
       const idea = { Text: text, Color: S.ideas.color, Goal: $('#ideaGoal').value, Pinned: false };
@@ -889,7 +1116,7 @@ document.addEventListener('click', async e => {
       if (S.view === 'tasks') render(); else go('tasks'); break;
     case 'fclear': Object.assign(S.f, { goal: '', cat: '', obj: '' }); render(); break;
     case 'refresh': refresh(true); break;
-    case 'sync': runSync(true); break;
+    case 'sync': runSchedule(true, 'full'); break;
     case 'password': openPassword(); break;
     case 'logout': logout(false); break;
     case 'theme': {
@@ -970,7 +1197,51 @@ const Demo = (() => {
     { ID: 'i1', Text: 'Use drone photos for seagrass cover\nCompare with quadrat data from the last survey', Color: 'lagoon', Pinned: true, Goal: '🌊 Research', Updated: td + 'T08:00:00' },
     { ID: 'i2', Text: 'Short video for the R course launch', Color: 'coral', Pinned: false, Goal: '', Updated: d(-1) + 'T17:00:00' },
     { ID: 'i3', Text: 'Ask the fishers about seasonal catches\nMaybe add a calendar question to the survey', Color: 'sand', Pinned: false, Goal: '🌊 Research', Updated: d(-3) + 'T10:00:00' }];
-  const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, ideas: db.ideas, user: S.user, today: td })) });
+  // --- demo scheduling (very simplified: greedy in working / personal hours) ---
+  const wk = [1, 2, 3, 4, 5], sl = (days, r) => { const o = {}; days.forEach(x => { o[x] = r.slice(); }); return o; };
+  const pers = sl(wk, [['04:00', '08:30'], ['12:30', '14:30'], ['17:30', '21:30']]); pers[6] = [['04:00', '06:00']];
+  const spafi = sl([1, 2, 3, 4, 5, 6], [['04:00', '06:00']]); spafi[6] = [['04:00', '06:00'], ['16:00', '17:00']]; spafi[0] = [['15:00', '18:00']];
+  db.settings = { categories: [{ name: 'Working', color: '#0a8f8a', slots: sl(wk, [['08:30', '12:30'], ['14:30', '17:30']]) },
+      { name: 'Personal', color: '#f2654f', slots: pers }, { name: 'Spafi', color: '#8e6cf0', slots: spafi }],
+    goalMap: { '🌊 Research': 'Working', '📗 Manuscript': 'Working', '💼 Consulting': 'Working' }, catMap: {}, defaultCategory: 'Working',
+    minBlock: 30, maxBlock: 120, horizonDays: 7, calendarId: 'demo',
+    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' } };
+  const at = (n, hm) => { const x = new Date(); x.setDate(x.getDate() + n); const [h, m] = hm.split(':').map(Number); x.setHours(h, m, 0, 0); return x.getTime(); };
+  const meetings = [{ title: 'Lab meeting', s: at(0, '10:00'), e: at(0, '11:00') }, { title: 'Call with MNP', s: at(1, '14:30'), e: at(1, '15:30') }];
+  db.bookings = [{ id: 'b1', name: 'Hery R.', email: 'hery@example.org', minutes: 30, start: new Date(at(2, '09:00')).toISOString(), end: new Date(at(2, '09:30')).toISOString(), topic: 'Data sharing for the seagrass survey', status: 'Pending' }];
+  db.blocks = [];
+  const wins = (cat, days) => { const out = []; for (let n = 0; n < days; n++) { const d = new Date(); d.setDate(d.getDate() + n);
+    (cat.slots[d.getDay()] || []).forEach(r => out.push([at(n, r[0]), at(n, r[1])])); } return out; };
+  function demoPlan() {
+    const keepPinned = db.blocks.filter(b => b.pinned); const occ = meetings.map(m => [m.s, m.e]).concat(keepPinned.map(b => [b.s, b.e]));
+    db.blocks = keepPinned.slice(); const next = {}, atRisk = [], now = Date.now();
+    const pr = { High: 0, Medium: 1, Low: 2 };
+    db.tasks.filter(t => t['Auto schedule'] === 'YES' && t.Status !== 'Completed' && Number(t['Est hours']) > 0)
+      .sort((a, b) => (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3) || String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')))
+      .forEach(t => {
+        const cat = db.settings.categories.find(c => c.name === (t['Time category'] || db.settings.goalMap[t['Main goal']] || 'Working')) || db.settings.categories[0];
+        let need = Number(t['Est hours']) * 3600000 - keepPinned.filter(b => b.taskId === t.ID).reduce((a, b) => a + b.e - b.s, 0);
+        if (String(t['Start now']).toLowerCase() === 'do now') { const s0 = Math.floor(now / 300000) * 300000, len = Math.min(need, 7200000);
+          db.blocks.push({ id: 'n' + t.ID + s0, taskId: t.ID, title: t.Task, s: s0, e: s0 + len, pinned: true }); occ.push([s0, s0 + len]); need -= len; t['Start now'] = ''; next[t.ID] = new Date(s0).toISOString(); }
+        wins(cat, 7).forEach(w => {
+          let st = Math.max(w[0], Math.ceil(now / 900000) * 900000);
+          while (need > 0 && st + 1800000 <= w[1]) {
+            const hit = occ.find(o => o[0] < st + 1800000 && st < o[1]); if (hit) { st = hit[1]; continue; }
+            let en = Math.min(w[1], st + Math.min(need, 7200000)); const h2 = occ.find(o => o[0] < en && st < o[1]); if (h2) en = h2[0];
+            if (en - st < 1800000) { st = en; continue; }
+            db.blocks.push({ id: 'b' + t.ID + st, taskId: t.ID, title: t.Task, s: st, e: en, pinned: false }); occ.push([st, en]);
+            if (!next[t.ID]) next[t.ID] = new Date(st).toISOString(); need -= en - st; st = en;
+          }
+        });
+        if (need > 0 && t['Due date']) atRisk.push(t.ID);
+      });
+    db.status = { lastRun: new Date().toISOString(), next, atRisk, doingNow: db.blocks.filter(b => b.pinned && b.s <= now && b.e > now).map(b => b.taskId), overTime: [] };
+  }
+  db.tasks.forEach(t => { if (t.Reclaim === 'YES') t['Auto schedule'] = 'YES'; });
+  demoPlan();
+  const sched = () => ({ status: db.status, categories: db.settings.categories.map(c => ({ name: c.name, color: c.color })), goalMap: db.settings.goalMap,
+    catMap: db.settings.catMap, defaultCategory: 'Working', pendingBookings: db.bookings.filter(b => b.status === 'Pending').length, ready: true });
+  const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, ideas: db.ideas, sched: sched(), user: S.user, today: td })) });
   const wait = v => new Promise(r => setTimeout(() => r(v), 300));
   return {
     call(action, p) {
@@ -995,6 +1266,18 @@ const Demo = (() => {
           if (p.itself) { const k = { objective: 'objectives', category: 'categories', goal: 'goals' }[p.kind]; db[k] = db[k].filter(x => x.Name !== name); }
         });
         return wait(Object.assign(out(), { text: 'Removed ' + n + ' task(s).' })); }
+      if (action === 'schedule' || action === 'sync') { demoPlan(); return wait({ ok: true, status: db.status }); }
+      if (action === 'calendar') { const f = new Date(p.from).getTime(), t2 = new Date(p.to).getTime(), iso = x => new Date(x).toISOString();
+        const windows = []; db.settings.categories.forEach(c => wins(c, 10).forEach(w => { if (w[1] > f && w[0] < t2) windows.push({ cat: c.name, color: c.color, start: iso(w[0]), end: iso(w[1]) }); }));
+        return wait({ ok: true, cal: { windows, main: meetings.map(m => ({ title: m.title, start: iso(m.s), end: iso(m.e), allDay: false })),
+          blocks: db.blocks.map(b => ({ id: b.id, taskId: b.taskId, title: b.title, pinned: b.pinned, start: iso(b.s), end: iso(b.e) })), bookings: db.bookings } }); }
+      if (action === 'moveBlock') { const b = db.blocks.find(x => x.id === p.id); if (b) { b.s = new Date(p.start).getTime(); b.e = new Date(p.end).getTime(); b.pinned = true; } demoPlan(); return wait({ ok: true }); }
+      if (action === 'settingsGet') return wait({ ok: true, settings: JSON.parse(JSON.stringify(db.settings)), usage: { runs: 12, seconds: 95, writes: 37 } });
+      if (action === 'settingsSave') { db.settings = Object.assign(db.settings, p.settings); demoPlan(); return wait({ ok: true, settings: db.settings }); }
+      if (action === 'bookings') return wait({ ok: true, bookings: db.bookings });
+      if (action === 'bookingDecide') { const b = db.bookings.find(x => x.id === p.id); b.status = p.accept ? 'Accepted' : 'Declined';
+        if (p.accept) meetings.push({ title: 'Meeting with ' + b.name, s: new Date(b.start).getTime(), e: new Date(b.end).getTime() }); demoPlan();
+        return wait({ ok: true, status: b.status, bookings: db.bookings }); }
       if (action === 'resetAll') { const n = db.tasks.length; db.tasks = []; db.objectives = []; db.categories = []; if (p.alsoGoals) db.goals = [];
         return wait(Object.assign(out(), { text: n + ' task(s) removed' })); }
       return wait({ ok: true });
