@@ -10,7 +10,7 @@ const CFG = window.TT_CONFIG || {};
 const DEMO = !CFG.API_URL;
 const S = {
   token: null, user: null, data: null, view: 'home',
-  f: { q: '', scope: 'open', goal: '', obj: '' },
+  f: { q: '', scope: 'open', goal: '', cat: '', obj: '' },
   editing: null, form: null,
   easy: { max: 2, q: '', open: new Set() },
   ideas: { q: '', pinned: false, color: 'sand' }, ideaForm: null, ptab: 'obj',
@@ -234,19 +234,31 @@ function filtered() {
   const f = S.f, q = norm(f.q);
   return S.data.tasks.filter(t =>
     (f.scope === 'all' || (f.scope === 'open' ? !isDone(t) : isDone(t))) &&
-    (!f.goal || t['Main goal'] === f.goal) && (!f.obj || t.Objective === f.obj) &&
+    (!f.goal || t['Main goal'] === f.goal) && (!f.cat || t.Category === f.cat) && (!f.obj || t.Objective === f.obj) &&
     (!q || norm([t.Task, t.Objective, t.Category, t.Notes].join(' ')).includes(q)));
+}
+function setTaskFilter(key, val, noRender) {
+  const f = S.f; f[key] = val;
+  if (key === 'goal') { f.cat = ''; f.obj = ''; }
+  if (key === 'cat') { f.obj = ''; const c = catOrder().find(x => x.name === val); if (val && c && c.goal) f.goal = c.goal; }
+  if (key === 'obj' && val) { const o = S.data.objectives.find(x => x.Name === val); if (o) { f.cat = o.Category; const c = catOrder().find(x => x.name === o.Category); if (c && c.goal) f.goal = c.goal; } }
+  if (!noRender) render();
 }
 function viewTasks() {
   const f = S.f, arr = filtered(), groups = new Map();
   sortTasks(arr).forEach(t => { const k = t.Objective || 'No objective'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
   const chip = (lbl, on, act, val) => `<button class="chip" aria-pressed="${on}" data-act="${act}" data-v="${esc(val)}">${esc(lbl)}</button>`;
-  const goalChips = S.data.goals.map(g => chip(g.Name, f.goal === g.Name, 'fgoal', g.Name)).join('');
+  const D = S.data;
+  const cats = catOrder().filter(c => !f.goal || c.goal === f.goal).map(c => c.name);
+  const objs = D.objectives.filter(o => f.cat ? o.Category === f.cat : (!f.goal || cats.includes(o.Category))).map(o => o.Name);
+  const sel = (key, label, list, val) => { const all = list.slice(); if (val && !all.includes(val)) all.push(val);
+    return `<select class="fsel ${val ? 'on' : ''}" data-ff="${key}" aria-label="${label}"><option value="">${label}</option>${all.map(x => `<option ${x === val ? 'selected' : ''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select>`; };
+  const any = f.goal || f.cat || f.obj;
   return `${pageTop('Tasks')}
     <div class="toolbar"><input class="search" type="search" placeholder="Search tasks" value="${esc(f.q)}" data-f="q" aria-label="Search tasks">
       <div class="chips">${chip('Open', f.scope === 'open', 'fscope', 'open')}${chip('Done', f.scope === 'done', 'fscope', 'done')}${chip('All', f.scope === 'all', 'fscope', 'all')}
-        ${f.obj ? `<button class="chip filter" data-act="fobj-clear">${esc(f.obj)} ✕</button>` : ''}</div>
-      <div class="chips">${chip('All goals', !f.goal, 'fgoal', '')}${goalChips}</div></div>
+        ${any ? '<button class="chip filter" data-act="fclear">Clear filters ✕</button>' : ''}</div>
+      <div class="fsels">${sel('goal', 'All goals', D.goals.map(g => g.Name), f.goal)}${sel('cat', 'All categories', cats, f.cat)}${sel('obj', 'All objectives', objs, f.obj)}</div></div>
     ${groups.size ? [...groups].map(([o, ts]) => `<div class="group"><div class="group-h"><b>${esc(o)}</b><small>${esc(ts[0].Category || '')} · ${ts.length}</small></div>${list(ts)}</div>`).join('')
       : '<div class="empty">No tasks here.</div>'}`;
 }
@@ -376,12 +388,47 @@ function ideaToTask(x, fromSheet) {
 /* =====================================================================
    Reset tools (Me > Advanced)
    ===================================================================== */
-const RESET = {
-  objective: { list: () => S.data.objectives.map(o => o.Name), title: 'Reset an objective', what: 'Removes <b>all tasks</b> of this objective. The objective itself is kept.' },
-  category:  { list: () => S.data.categories.map(c => c.Name), title: 'Reset a category', what: 'Removes <b>all objectives and their tasks</b> in this category. The category itself is kept.' },
-  goal:      { list: () => S.data.goals.map(g => g.Name), title: 'Reset a goal', what: 'Removes <b>all categories, objectives and tasks</b> of this goal. The goal itself is kept.' }
-};
-function openReset(kind) {
+const RS_LABEL = { objective: ['objective', 'objectives', 'their tasks'], category: ['category', 'categories', 'their objectives and tasks'], goal: ['goal', 'goals', 'their categories, objectives and tasks'] };
+const RS_FIELD = { objective: 'Objective', category: 'Category', goal: 'Main goal' };
+function rsItems(kind) {
+  const D = S.data, names = [];
+  if (kind === 'objective') catOrder().forEach(c => { D.objectives.filter(o => o.Category === c.name).forEach(o => names.push({ name: o.Name, goal: c.goal })); });
+  if (kind === 'category') catOrder().forEach(c => names.push({ name: c.name, goal: c.goal }));
+  if (kind === 'goal') D.goals.forEach(g => names.push({ name: g.Name, goal: g.Name }));
+  D.objectives.forEach(o => { if (kind === 'objective' && !names.some(x => x.name === o.Name)) names.push({ name: o.Name, goal: '' }); });
+  return names.map(x => { const st = stat(D.tasks.filter(t => t[RS_FIELD[kind]] === x.name)); return Object.assign(x, { st, done: st.n > 0 && st.d === st.n }); });
+}
+// what would be removed (computed from the data already on the phone)
+function rsPreview() {
+  const R = S.rs, D = S.data, sel = [...R.sel];
+  const tasks = D.tasks.filter(t => sel.includes(t[RS_FIELD[R.kind]])).length;
+  let cats = R.kind === 'goal' ? D.categories.filter(c => sel.includes(c['Main goal'])).map(c => c.Name) : [];
+  const catNames = R.kind === 'category' ? sel : cats;
+  let objs = R.kind === 'objective' ? 0 : D.objectives.filter(o => catNames.includes(o.Category)).length;
+  let nc = cats.length, ng = 0;
+  if (R.itself) { if (R.kind === 'objective') objs += sel.length; if (R.kind === 'category') nc += sel.length; if (R.kind === 'goal') ng = sel.length; }
+  const parts = [tasks + ' task' + (tasks === 1 ? '' : 's')];
+  if (objs) parts.push(objs + ' objective' + (objs === 1 ? '' : 's'));
+  if (nc) parts.push(nc + (nc === 1 ? ' category' : ' categories'));
+  if (ng) parts.push(ng + ' goal' + (ng === 1 ? '' : 's'));
+  return sel.length ? 'Will remove: ' + parts.join(', ') : 'Nothing selected yet.';
+}
+function rsBody() {
+  const R = S.rs, L = RS_LABEL[R.kind];
+  const items = rsItems(R.kind).filter(x => !R.onlyDone || x.done);
+  const tab = (k, l) => `<button type="button" data-act="rs-kind" data-v="${k}" aria-pressed="${R.kind === k}">${l}</button>`;
+  return `<div class="seg" style="margin-bottom:12px">${tab('objective', 'Objectives')}${tab('category', 'Categories')}${tab('goal', 'Goals')}</div>
+    <label class="switch"><span>Only completed (100%)</span><input type="checkbox" data-rsopt="onlyDone" ${R.onlyDone ? 'checked' : ''}></label>
+    <div class="rs-head"><span>Tick the ${L[1]} to reset</span><span><button class="link" data-act="rs-all">All</button> · <button class="link" data-act="rs-none">None</button></span></div>
+    <div class="rs-list">${items.length ? items.map(x => `<label class="rs-item" style="--h:${hue(x.goal)}"><input type="checkbox" data-rs="${esc(x.name)}" ${R.sel.has(x.name) ? 'checked' : ''}>
+      <span class="dot"></span><span class="nm">${esc(x.name)}</span><small>${x.st.d}/${x.st.n} · ${x.st.p}%</small></label>`).join('')
+      : `<div class="note">No ${R.onlyDone ? 'completed ' : ''}${L[1]}.</div>`}</div>
+    <label class="switch"><span>Also remove the ${L[1]} themselves<small>Off = keep them (empty) so you don't re-enter them · On = remove them with ${L[2]}</small></span>
+      <input type="checkbox" data-rsopt="itself" ${R.itself ? 'checked' : ''}></label>
+    <p class="note" id="rsPrev" style="color:var(--warn);margin:4px 0 12px">${rsPreview()}</p>
+    <button class="btn danger-fill block" data-act="reset-go" data-v="many">Reset selected</button>`;
+}
+function openReset(kind, opts) {
   if (kind === 'all') {
     openSheet('Reset everything', `<p>Removes <b>all your tasks, objectives and categories</b>. Ideas are kept. This cannot be undone.</p>
       <label class="switch"><span>Also remove my goals</span><input type="checkbox" id="rsGoals"></label>
@@ -389,24 +436,22 @@ function openReset(kind) {
       <button class="btn danger-fill block" data-act="reset-go" data-v="all">Reset everything</button>`, null);
     return;
   }
-  const R = RESET[kind], items = R.list();
-  openSheet(R.title, `<p>${R.what}</p>
-    <label class="field"><span class="lab">Choose</span><select id="rsItem">${items.map(n => `<option>${esc(n)}</option>`).join('')}</select></label>
-    <p class="note" id="rsPrev" style="color:var(--warn)"></p>
-    <button class="btn danger-fill block" data-act="reset-go" data-v="${kind}" ${items.length ? '' : 'disabled'}>Reset</button>`, null);
-  const sel = $('#rsItem'); if (!sel) return;
-  const prev = () => { $('#rsPrev').textContent = 'Will remove: …';
-    api('resetPreview', { kind, name: sel.value }).then(r => { $('#rsPrev').textContent = 'Will remove: ' + r.text; }).catch(() => { $('#rsPrev').textContent = ''; }); };
-  sel.onchange = prev; if (items.length) prev();
+  opts = opts || {};
+  S.rs = { kind, onlyDone: !!opts.onlyDone, itself: !!opts.itself, sel: new Set() };
+  if (opts.onlyDone) rsItems(kind).filter(x => x.done).forEach(x => S.rs.sel.add(x.name));
+  openSheet(opts.onlyDone ? 'Clean up completed' : 'Reset', rsBody(), null);
 }
+function rsRedraw() { const sb = $('#sheetBody'), y = sb.scrollTop; sb.innerHTML = rsBody(); sb.scrollTop = y; }
 async function doReset(kind, btn) {
   let payload;
   if (kind === 'all') {
     if ($('#rsWord').value.trim() !== 'RESET') return toast('Type RESET to confirm');
     payload = ['resetAll', { alsoGoals: $('#rsGoals').checked }];
   } else {
-    const name = $('#rsItem').value; if (!confirm('Reset "' + name + '"? This cannot be undone.')) return;
-    payload = ['reset', { kind, name }];
+    const R = S.rs, names = [...R.sel];
+    if (!names.length) return toast('Tick at least one item');
+    if (!confirm('Reset ' + names.length + ' ' + RS_LABEL[R.kind][names.length > 1 ? 1 : 0] + '? ' + rsPreview().replace('Will remove: ', 'This removes ') + '. It cannot be undone.')) return;
+    payload = ['resetMany', { kind: R.kind, names, itself: R.itself }];
   }
   btn.disabled = true; syncing(true, 'Resetting…');
   try { const r = await api(payload[0], payload[1]); setData(r.data); closeSheet(); render(); toast(r.text || 'Done'); }
@@ -430,14 +475,13 @@ function viewMe() {
       <button data-act="logout" style="color:var(--danger)">Log out</button>
     </div>
     ${DEMO ? '<p class="note">Demo mode: changes are not saved. Add your Apps Script URL in config.js.</p>' : ''}
-    <details class="advanced"><summary>Advanced</summary>
+    <details class="advanced" ${S.advOpen ? 'open' : ''}><summary>Advanced</summary>
       <div class="card menu">
-        <button data-act="reset-open" data-v="objective">Reset the tasks of an objective <small>›</small></button>
-        <button data-act="reset-open" data-v="category">Reset the objectives of a category <small>›</small></button>
-        <button data-act="reset-open" data-v="goal">Reset the categories of a goal <small>›</small></button>
+        <button data-act="reset-open" data-v="objective">Reset objectives, categories or goals <small>›</small></button>
+        <button data-act="reset-open" data-v="completed">Clean up completed objectives or categories <small>›</small></button>
         <button data-act="reset-open" data-v="all" style="color:var(--danger)">Reset everything <small>›</small></button>
       </div>
-      <p class="note">Resetting deletes tasks for good and removes them from Google Tasks / Reclaim. The item you reset is kept, so you don't need to re-enter it.</p>
+      <p class="note">Resetting deletes tasks for good and removes them from Google Tasks / Reclaim. You choose whether the reset items themselves are kept (so you don't re-enter them) or removed too.</p>
     </details>
     ${isAdmin() ? '' : '<p class="note">Your tasks are private to your account. Reclaim scheduling is only available to the owner.</p>'}`;
 }
@@ -826,7 +870,10 @@ document.addEventListener('click', async e => {
     case 'idea-task': { const id = a.dataset.iid || a.closest('[data-iid]').dataset.iid; ideaToTask(S.data.ideas.find(i => i.ID === id), !!a.closest('#sheet')); break; }
     case 'idea-del': { if (!confirm('Delete this idea?')) return; const id = S.ideaForm.ID; S.data.ideas = S.data.ideas.filter(i => i.ID !== id);
       closeSheet(); render(); apiIdea('deleteIdea', { id }, 'Idea deleted'); break; }
-    case 'reset-open': openReset(a.dataset.v); break;
+    case 'reset-open': a.dataset.v === 'completed' ? openReset('objective', { onlyDone: true, itself: true }) : openReset(a.dataset.v); break;
+    case 'rs-kind': S.rs.kind = a.dataset.v; S.rs.sel = new Set(); if (S.rs.onlyDone) rsItems(S.rs.kind).filter(x => x.done).forEach(x => S.rs.sel.add(x.name)); rsRedraw(); break;
+    case 'rs-all': rsItems(S.rs.kind).filter(x => !S.rs.onlyDone || x.done).forEach(x => S.rs.sel.add(x.name)); rsRedraw(); break;
+    case 'rs-none': S.rs.sel.clear(); rsRedraw(); break;
     case 'reset-go': doReset(a.dataset.v, a); break;
     case 'easy-max': S.easy.max = Number(a.dataset.v); render(); break;
     case 'show-add': {
@@ -838,8 +885,9 @@ document.addEventListener('click', async e => {
     case 'close-sheet': closeSheet(); break;
     case 'fscope': S.f.scope = a.dataset.v; render(); break;
     case 'fgoal': S.f.goal = a.dataset.v; render(); break;
-    case 'fobj': Object.assign(S.f, { obj: a.dataset.v, goal: '', scope: 'all', q: '' }); if (S.view === 'tasks') render(); else go('tasks'); break;
-    case 'fobj-clear': S.f.obj = ''; render(); break;
+    case 'fobj': Object.assign(S.f, { scope: 'all', q: '', goal: '', cat: '' }); setTaskFilter('obj', a.dataset.v, true);
+      if (S.view === 'tasks') render(); else go('tasks'); break;
+    case 'fclear': Object.assign(S.f, { goal: '', cat: '', obj: '' }); render(); break;
     case 'refresh': refresh(true); break;
     case 'sync': runSync(true); break;
     case 'password': openPassword(); break;
@@ -869,9 +917,18 @@ document.addEventListener('input', e => {
   if (k === 'easyq') S.easy.q = e.target.value; else if (k === 'ideaq') S.ideas.q = e.target.value; else S.f[k] = e.target.value;
   render();
 });
+// reset panel: item ticks and options
+document.addEventListener('change', e => {
+  const d = e.target.dataset || {};
+  if (d.rs !== undefined) { e.target.checked ? S.rs.sel.add(d.rs) : S.rs.sel.delete(d.rs); $('#rsPrev').textContent = rsPreview(); }
+  if (d.rsopt === 'itself') { S.rs.itself = e.target.checked; $('#rsPrev').textContent = rsPreview(); }
+  if (d.rsopt === 'onlyDone') { S.rs.onlyDone = e.target.checked; S.rs.sel = new Set(); if (S.rs.onlyDone) { S.rs.itself = true; rsItems(S.rs.kind).filter(x => x.done).forEach(x => S.rs.sel.add(x.name)); } rsRedraw(); }
+  if (d.ff) { setTaskFilter(d.ff, e.target.value); }
+});
 // remember which category accordions are open on the Easy page
 document.addEventListener('toggle', e => {
-  const d = e.target; if (!d.classList || !d.classList.contains('acc') || S.easy.q) return;
+  const d = e.target; if (d.classList && d.classList.contains('advanced')) { S.advOpen = d.open; return; }
+  if (!d.classList || !d.classList.contains('acc') || S.easy.q) return;
   if (d.open) S.easy.open.add(d.dataset.cat); else S.easy.open.delete(d.dataset.cat);
 }, true);
 document.addEventListener('keydown', e => {
@@ -930,13 +987,14 @@ const Demo = (() => {
       if (action === 'saveIdea') { let x = db.ideas.find(i => i.ID === p.idea.ID);
         if (!x) { x = { ID: 'i' + Date.now() }; db.ideas.push(x); } Object.assign(x, p.idea, { Updated: new Date().toISOString().slice(0, 19) }); return wait(out()); }
       if (action === 'deleteIdea') { db.ideas = db.ideas.filter(i => i.ID !== p.id); return wait(out()); }
-      if (action === 'resetPreview') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind];
-        return wait({ ok: true, text: db.tasks.filter(t => t[f] === p.name).length + ' task(s)' }); }
-      if (action === 'reset') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind];
-        const n = db.tasks.filter(t => t[f] === p.name).length; db.tasks = db.tasks.filter(t => t[f] !== p.name);
-        if (p.kind === 'category') db.objectives = db.objectives.filter(o => o.Category !== p.name);
-        if (p.kind === 'goal') { const cs = db.categories.filter(c => c['Main goal'] === p.name).map(c => c.Name); db.categories = db.categories.filter(c => !cs.includes(c.Name)); db.objectives = db.objectives.filter(o => !cs.includes(o.Category)); }
-        return wait(Object.assign(out(), { text: 'Done: removed ' + n + ' task(s). "' + p.name + '" is kept.' })); }
+      if (action === 'resetMany') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind]; let n = 0;
+        p.names.forEach(name => {
+          n += db.tasks.filter(t => t[f] === name).length; db.tasks = db.tasks.filter(t => t[f] !== name);
+          if (p.kind === 'category') db.objectives = db.objectives.filter(o => o.Category !== name);
+          if (p.kind === 'goal') { const cs = db.categories.filter(c => c['Main goal'] === name).map(c => c.Name); db.categories = db.categories.filter(c => !cs.includes(c.Name)); db.objectives = db.objectives.filter(o => !cs.includes(o.Category)); }
+          if (p.itself) { const k = { objective: 'objectives', category: 'categories', goal: 'goals' }[p.kind]; db[k] = db[k].filter(x => x.Name !== name); }
+        });
+        return wait(Object.assign(out(), { text: 'Removed ' + n + ' task(s).' })); }
       if (action === 'resetAll') { const n = db.tasks.length; db.tasks = []; db.objectives = []; db.categories = []; if (p.alsoGoals) db.goals = [];
         return wait(Object.assign(out(), { text: n + ' task(s) removed' })); }
       return wait({ ok: true });

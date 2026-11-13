@@ -17,7 +17,7 @@
 
 const TT = {
   // Tasks/goals/categories/objectives with an EMPTY Owner belong to this account.
-  ADMIN_EMAIL: 'aroofalinirina@gmail.com', // <- put your email here (in Apps Script only, not in GitHub)
+  ADMIN_EMAIL: 'YOUR_EMAIL@gmail.com', // <- put your email here (in Apps Script only, not in GitHub)
   SESSION_DAYS: 90,
   HASH_ROUNDS: 400,
   SHEETS: { tasks: 'Tasks', goals: 'Goals', categories: 'Categories', objectives: 'Objectives', users: 'Users', ideas: 'Ideas' },
@@ -58,10 +58,8 @@ function tt_route_(req) {
     case 'addItem':  return { ok: true, data: tt_addItem_(user, req.kind, req.item || {}) };
     case 'saveIdea': return { ok: true, data: tt_saveIdea_(user, req.idea || {}) };
     case 'deleteIdea': return { ok: true, data: tt_deleteIdea_(user, req.id) };
-    case 'resetPreview': return { ok: true, text: ttResetPreview(req.kind, JSON.stringify({ name: req.name, owner: user.email })) };
-    case 'reset': {
-      if (['objective', 'category', 'goal'].indexOf(req.kind) < 0) return { ok: false, error: 'Unknown reset' };
-      const msg = tt_reset_(req.kind, req.name, user.email, user.role === 'admin');
+    case 'resetMany': {
+      const msg = tt_resetMany_(req.kind, req.names || [], user.email, !!req.itself, user.role === 'admin');
       return { ok: true, text: msg, data: tt_data_(user) };
     }
     case 'resetAll': {
@@ -187,9 +185,9 @@ function onOpen() {
     .addItem('Add or reset a user', 'ttMenuAddUser')
     .addItem('Test a login', 'ttMenuTestLogin')
     .addSeparator()
-    .addItem('Reset the tasks of an objective…', 'ttMenuResetObjective')
-    .addItem('Reset the objectives of a category…', 'ttMenuResetCategory')
-    .addItem('Reset the categories of a goal…', 'ttMenuResetGoal')
+    .addItem('Reset objectives…', 'ttMenuResetObjective')
+    .addItem('Reset categories…', 'ttMenuResetCategory')
+    .addItem('Reset goals…', 'ttMenuResetGoal')
     .addItem('Reset everything…', 'ttMenuResetAll')
     .addToUi();
 }
@@ -425,65 +423,100 @@ function tt_clearTaskRows_(sh, rowNums, width) {
 function tt_deleteRows_(sh, rowNums) { rowNums.sort((a, b) => b - a).forEach(r => sh.deleteRow(r)); }
 function tt_ownerLabel_(o) { const e = tt_owner_(o); return e === TT.ADMIN_EMAIL.toLowerCase() ? '' : ' (' + e + ')'; }
 
-/* What a reset would remove. kind: objective | category | goal */
-function tt_resetPlan_(kind, name, owner) {
-  const T = tt_read_(TT.SHEETS.tasks), O = tt_read_(TT.SHEETS.objectives), C = tt_read_(TT.SHEETS.categories);
+/* What a reset would remove. kind: objective | category | goal.
+   itself = true also removes the objective / category / goal itself. */
+function tt_resetPlan_(kind, name, owner, itself) {
+  const T = tt_read_(TT.SHEETS.tasks), O = tt_read_(TT.SHEETS.objectives), C = tt_read_(TT.SHEETS.categories), G = tt_read_(TT.SHEETS.goals);
   const col = (t, h) => t.headers.indexOf(h);
   const same = (t, r) => tt_owner_(r[col(t, 'Owner')]) === owner;
-  let cats = [], objs = [];
-  if (kind === 'goal') cats = C.rows.map((r, i) => ({ r, i })).filter(x => same(C, x.r) && String(x.r[col(C, 'Main goal')]) === name);
+  const rowsOf = (t, f) => t.rows.map((r, i) => ({ r, i })).filter(x => String(x.r[0]).trim() && same(t, x.r) && f(x.r));
+  const cats = kind === 'goal' ? rowsOf(C, r => String(r[col(C, 'Main goal')]) === name) : [];
   const catNames = kind === 'category' ? [name] : cats.map(x => String(x.r[0]));
-  if (kind !== 'objective') objs = O.rows.map((r, i) => ({ r, i })).filter(x => same(O, x.r) && catNames.indexOf(String(x.r[col(O, 'Category')])) > -1);
+  const objs = kind === 'objective' ? [] : rowsOf(O, r => catNames.indexOf(String(r[col(O, 'Category')])) > -1);
   const field = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[kind];
-  const tasks = T.rows.map((r, i) => ({ r, i })).filter(x => String(x.r[col(T, 'ID')]).trim() && same(T, x.r) && String(x.r[col(T, field)]) === name);
-  return { T, O, C, tasks, objs, cats };
+  const tasks = rowsOf(T, r => String(r[col(T, field)]) === name);
+  const L = { objective: O, category: C, goal: G }[kind];
+  const self = itself ? rowsOf(L, r => String(r[0]) === name) : [];
+  return { T, O, C, L, tasks, objs, cats, self };
 }
-function ttResetPreview(kind, key) {
-  const k = JSON.parse(key), p = tt_resetPlan_(kind, k.name, k.owner);
-  return p.tasks.length + ' task(s)' + (kind !== 'objective' ? ', ' + p.objs.length + ' objective(s)' : '') + (kind === 'goal' ? ', ' + p.cats.length + ' categor(ies)' : '');
+function tt_resetSummary_(kind, n, itself) {
+  const parts = [n.t + ' task(s)'];
+  if (n.o) parts.push(n.o + ' objective(s)');
+  if (n.c) parts.push(n.c + ' categor' + (n.c > 1 ? 'ies' : 'y'));
+  if (n.g) parts.push(n.g + ' goal(s)');
+  return parts.join(', ');
 }
-function ttDoReset(kind, key) { const k = JSON.parse(key); return tt_reset_(kind, k.name, k.owner, true); }
-function tt_reset_(kind, name, owner, runSync) {
-  const k = { name: name, owner: owner };
+function tt_count_(kind, p, n) {
+  n.t += p.tasks.length; n.o += p.objs.length + (kind === 'objective' ? p.self.length : 0);
+  n.c += p.cats.length + (kind === 'category' ? p.self.length : 0); n.g += kind === 'goal' ? p.self.length : 0;
+}
+function tt_resetMany_(kind, names, owner, itself, runSync) {
+  if (['objective', 'category', 'goal'].indexOf(kind) < 0) throw new Error('Unknown reset');
+  const n = { t: 0, o: 0, c: 0, g: 0 };
   const lock = LockService.getScriptLock(); lock.waitLock(25000);
-  let p;
   try {
-    p = tt_resetPlan_(kind, k.name, k.owner);
-    tt_clearTaskRows_(p.T.sh, p.tasks.map(x => x.i + 2), p.T.headers.length);
-    tt_deleteRows_(p.O.sh, p.objs.map(x => x.i + 2));
-    tt_deleteRows_(p.C.sh, p.cats.map(x => x.i + 2));
+    (names || []).forEach(name => {
+      const p = tt_resetPlan_(kind, String(name), owner, itself);   // re-read each time: rows move after deletes
+      tt_count_(kind, p, n);
+      tt_clearTaskRows_(p.T.sh, p.tasks.map(x => x.i + 2), p.T.headers.length);
+      tt_deleteRows_(p.O.sh, p.objs.map(x => x.i + 2));
+      tt_deleteRows_(p.C.sh, p.cats.map(x => x.i + 2));
+      tt_deleteRows_(p.L.sh, p.self.map(x => x.i + 2));
+    });
   } finally { lock.releaseLock(); }
   if (runSync) { try { sendTasksToGoogleTasks(); } catch (e) { /* the 10-minute timer will catch up */ } }
-  return 'Done: removed ' + p.tasks.length + ' task(s)' +
-    (kind !== 'objective' ? ', ' + p.objs.length + ' objective(s)' : '') +
-    (kind === 'goal' ? ', ' + p.cats.length + ' categor(ies)' : '') + '. "' + k.name + '" is kept.';
+  return 'Removed ' + tt_resetSummary_(kind, n, itself) + '.';
 }
-function tt_resetDialog_(kind, sheetName, title, explain) {
-  const L = tt_read_(sheetName), oc = L.headers.indexOf('Owner');
-  const opts = L.rows.filter(r => String(r[0]).trim()).map(r => {
-    const key = JSON.stringify({ name: String(r[0]), owner: tt_owner_(r[oc]) });
-    return '<option value="' + key.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">' +
-      String(r[0]).replace(/&/g, '&amp;').replace(/</g, '&lt;') + tt_ownerLabel_(r[oc]) + '</option>';
-  }).join('');
+function ttResetPreviewMany(kind, names, itself) {
+  const n = { t: 0, o: 0, c: 0, g: 0 }, me = TT.ADMIN_EMAIL.toLowerCase();
+  (names || []).forEach(name => tt_count_(kind, tt_resetPlan_(kind, String(name), me, itself), n));
+  return tt_resetSummary_(kind, n, itself);
+}
+function ttDoResetMany(kind, names, itself) { return tt_resetMany_(kind, names, TT.ADMIN_EMAIL.toLowerCase(), itself, true); }
+
+/* Sheet dialog: tick several items, optionally only completed ones */
+function tt_resetDialog_(kind) {
+  const me = TT.ADMIN_EMAIL.toLowerCase();
+  const sheet = { objective: TT.SHEETS.objectives, category: TT.SHEETS.categories, goal: TT.SHEETS.goals }[kind];
+  const field = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[kind];
+  const L = tt_read_(sheet), T = tt_read_(TT.SHEETS.tasks);
+  const fc = T.headers.indexOf(field), sc = T.headers.indexOf('Status'), toc = T.headers.indexOf('Owner'), loc = L.headers.indexOf('Owner');
+  const items = L.rows.filter(r => String(r[0]).trim() && tt_owner_(r[loc]) === me).map(r => {
+    const name = String(r[0]);
+    const ts = T.rows.filter(t => String(t[0]).trim() && tt_owner_(t[toc]) === me && String(t[fc]) === name);
+    const d = ts.filter(t => String(t[sc]) === 'Completed').length;
+    return { name: name, n: ts.length, d: d, done: ts.length > 0 && d === ts.length };
+  });
+  const child = { objective: 'its tasks', category: 'its objectives and tasks', goal: 'its categories, objectives and tasks' }[kind];
   const html = '<div style="font:14px/1.5 Arial,sans-serif;color:#0b2a3a">' +
-    '<p style="margin-top:0">' + explain + '</p>' +
-    '<select id="s" style="width:100%;padding:8px;font-size:14px">' + opts + '</select>' +
+    '<p style="margin:0 0 8px">Tick the ' + kind + '(s) to reset. This removes ' + child + '.</p>' +
+    '<label><input type="checkbox" id="onlyDone"> Only show completed (100%)</label> &nbsp; <a href="#" id="all">select all</a> · <a href="#" id="none">none</a>' +
+    '<div id="list" style="max-height:230px;overflow:auto;border:1px solid #ddd;border-radius:8px;padding:6px;margin:8px 0"></div>' +
+    '<label><input type="checkbox" id="itself"> Also remove the ' + kind + '(s) themselves</label>' +
     '<p id="pv" style="color:#a85d00;min-height:20px"></p>' +
     '<button id="go" style="background:#d2452c;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:bold;cursor:pointer">Reset</button> ' +
     '<button onclick="google.script.host.close()" style="border:1px solid #ccc;background:#fff;border-radius:8px;padding:10px 16px;cursor:pointer">Cancel</button>' +
     '<p id="out" style="font-weight:bold"></p></div><script>' +
-    'var s=document.getElementById("s"),pv=document.getElementById("pv");' +
-    'function prev(){pv.textContent="Will remove: …";google.script.run.withSuccessHandler(function(t){pv.textContent="Will remove: "+t}).ttResetPreview("' + kind + '",s.value)}' +
-    's.onchange=prev;prev();' +
-    'document.getElementById("go").onclick=function(){if(!confirm("This cannot be undone. Continue?"))return;this.disabled=true;' +
-    'document.getElementById("out").textContent="Working…";google.script.run.withSuccessHandler(function(m){document.getElementById("out").textContent=m})' +
-    '.withFailureHandler(function(e){document.getElementById("out").textContent="Error: "+e.message}).ttDoReset("' + kind + '",s.value)}' +
+    'var items=' + JSON.stringify(items).replace(/</g, '\\u003c') + ',kind="' + kind + '",$=function(i){return document.getElementById(i)};' +
+    'function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}' +
+    'function draw(){var od=$("onlyDone").checked;$("list").innerHTML=items.filter(function(x){return !od||x.done}).map(function(x,i){' +
+    'return "<label style=\\"display:block;padding:3px 0\\"><input type=checkbox class=it value=\\""+esc(x.name).replace(/\\"/g,"&quot;")+"\\" "+(od?"checked":"")+"> "+esc(x.name)+' +
+    '" <span style=color:#888>("+x.d+"/"+x.n+")</span></label>"}).join("")||"<i>Nothing here.</i>";prev()}' +
+    'function sel(){return Array.prototype.map.call(document.querySelectorAll(".it:checked"),function(c){return c.value})}' +
+    'function prev(){var s=sel();if(!s.length){$("pv").textContent="Nothing selected.";return}$("pv").textContent="Will remove: …";' +
+    'google.script.run.withSuccessHandler(function(t){$("pv").textContent="Will remove: "+t}).ttResetPreviewMany(kind,s,$("itself").checked)}' +
+    '$("onlyDone").onchange=function(){$("itself").checked=$("onlyDone").checked;draw()};$("itself").onchange=prev;$("list").onchange=prev;' +
+    '$("all").onclick=function(e){e.preventDefault();document.querySelectorAll(".it").forEach(function(c){c.checked=true});prev()};' +
+    '$("none").onclick=function(e){e.preventDefault();document.querySelectorAll(".it").forEach(function(c){c.checked=false});prev()};' +
+    '$("go").onclick=function(){var s=sel();if(!s.length)return;if(!confirm("Reset "+s.length+" item(s)? This cannot be undone."))return;this.disabled=true;' +
+    '$("out").textContent="Working…";google.script.run.withSuccessHandler(function(m){$("out").textContent=m;items=items.filter(function(x){return s.indexOf(x.name)<0||!$("itself").checked});draw()})' +
+    '.withFailureHandler(function(e){$("out").textContent="Error: "+e.message}).ttDoResetMany(kind,s,$("itself").checked)};draw();' +
     '</script>';
-  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(300), title);
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(480).setHeight(470), 'Reset ' + kind + 's');
 }
-function ttMenuResetObjective() { tt_resetDialog_('objective', TT.SHEETS.objectives, 'Reset the tasks of an objective', 'Removes <b>all tasks</b> of the objective you choose. The objective itself is kept.'); }
-function ttMenuResetCategory()  { tt_resetDialog_('category', TT.SHEETS.categories, 'Reset the objectives of a category', 'Removes <b>all objectives and their tasks</b> in the category you choose. The category itself is kept.'); }
-function ttMenuResetGoal()      { tt_resetDialog_('goal', TT.SHEETS.goals, 'Reset the categories of a goal', 'Removes <b>all categories, objectives and tasks</b> of the goal you choose. The goal itself is kept.'); }
+function ttMenuResetObjective() { tt_resetDialog_('objective'); }
+function ttMenuResetCategory()  { tt_resetDialog_('category'); }
+function ttMenuResetGoal()      { tt_resetDialog_('goal'); }
 
 function ttMenuResetAll() {
   const ui = SpreadsheetApp.getUi();
