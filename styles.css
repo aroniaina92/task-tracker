@@ -445,3 +445,21 @@ details.advanced[open] summary{margin-bottom:10px}
 .ckrow.done .ck-name{color:var(--muted);text-decoration:line-through;font-weight:500}
 .ckrow.doing .ck-name::before{content:"▶ ";color:var(--coral)}
 .ck-risk{color:var(--danger);font-size:13px}
+
+/* Calendar page: month grid, tasks per day (no time slots) */
+.mcal{padding:10px 8px 8px;margin-bottom:6px}
+.mg-bar{display:flex;align-items:center;gap:6px;padding:0 4px 8px}
+.mg-bar b{flex:1;text-align:center;font-size:16px;text-transform:capitalize}
+.mg{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px}
+.mg.loading{opacity:.55}
+.mg-h{text-align:center;font-size:11px;font-weight:700;color:var(--muted);padding:2px 0 4px}
+.mg-d{display:flex;flex-direction:column;align-items:stretch;gap:2px;min-height:78px;padding:3px;border:1px solid var(--line);border-radius:8px;background:transparent;text-align:left;font:inherit;color:inherit;overflow:hidden;cursor:pointer}
+.mg-d.out{opacity:.45}
+.mg-d.today .mg-n{background:var(--accent);color:#fff}
+.mg-d.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.mg-n{align-self:flex-start;font-size:12px;font-weight:700;min-width:20px;height:20px;line-height:20px;border-radius:10px;text-align:center;padding:0 4px}
+.mg-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:10px;line-height:1.2;padding:1px 3px;border-radius:4px;background:hsl(var(--h,178) 62% 48% / .18);border-left:2px solid hsl(var(--h,178) 62% 48%);overflow:hidden;overflow-wrap:anywhere;hyphens:auto}
+.mg-t.done{text-decoration:line-through;opacity:.6}
+.mg-more{font-size:10px;font-weight:700;color:var(--muted);padding-left:3px}
+@media (min-width:700px){ .mg-d{min-height:104px;padding:5px} .mg-t{font-size:12px} }
+.sec-h .link{background:none;border:0;font:inherit;font-weight:600;cursor:pointer}

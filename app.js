@@ -88,14 +88,29 @@ const EMOJI_POOL = ['🌊', '🐠', '🐢', '🪸', '🐚', '🌿', '🌱', '�
   '📝', '💡', '🛠', '🎓', '🏠', '💰', '🤝', '🎵', '📷', '🌍', '🚀', '🧩', '🗓', '⭐', '🔥', '🌺', '🍀', '☀', '🌙', '🏃',
   '🎨', '🍽', '✈', '🧘', '📣', '💻', '🔧', '🦋', '🐝', '🌴', '🏝', '🐟', '🦐', '🌻', '🍎', '📦', '🔑', '🎤', '🧳', '🏆'];
 const autoEmojiOn = () => store.get('tt_autoemoji') !== false;
-function autoEmoji(name) {
+const emoClean = x => String(x || '').replace(/[️\s]/g, '');
+function pickEmoji(used, avoid) {
+  const taken = [...used, ...(avoid || [])].filter(Boolean);
+  const free = EMOJI_POOL.filter(e => !taken.some(u => u.includes(e)));
+  return free.length ? free[0] : EMOJI_POOL[Math.floor(Math.random() * EMOJI_POOL.length)];
+}
+// goals: emoji not used by another goal · categories: not used by another category
+function autoEmoji(name, kind) {
   name = String(name || '').trim();
   if (!autoEmojiOn() || !name || lead(name)) return name;
-  const clean = x => String(x || '').replace(/[\uFE0F\s]/g, '');
-  const used = new Set(S.data.goals.concat(S.data.categories).map(x => clean(lead(x.Name))).filter(Boolean));
-  const free = EMOJI_POOL.filter(e => ![...used].some(u => u.includes(e)));
-  const pick = free.length ? free[0] : EMOJI_POOL[Math.floor(Math.random() * EMOJI_POOL.length)];
-  return pick + ' ' + name;
+  const list = kind === 'categories' ? S.data.categories : S.data.goals;
+  return pickEmoji(list.map(x => emoClean(lead(x.Name)))) + ' ' + name;
+}
+// objectives: category emoji + an own emoji not used by another objective (tasks then copy both)
+function objectiveName(cat, typed) {
+  const catLead = lead(cat);
+  let text = String(typed || '').trim();
+  if (catLead && emoClean(text).startsWith(emoClean(catLead))) text = text.replace(/^[^\p{L}\p{N}]+/u, m => emoClean(m).slice(emoClean(catLead).length)).trim();
+  if (!lead(text) && autoEmojiOn() && text) {
+    const own = o => emoClean(lead(o.Name)).replace(emoClean(lead(o.Category)), '');
+    text = pickEmoji(S.data.objectives.map(own), [emoClean(catLead)]) + ' ' + text;
+  }
+  return withPrefix(catLead, text);
 }
 function okToSend(t) {
   if (hrs(t) > 0) return true;
@@ -331,7 +346,7 @@ function viewProjects() {
   } else {
     const objs = []; catOrder().forEach(c => {
       D.objectives.filter(o => o.Category === c.name && !objs.some(x => x.n === o.Name)).forEach(o => objs.push({ n: o.Name, g: c.goal }));
-      D.tasks.filter(t => t.Category === c.name && t.Objective && !objs.some(x => x.n === t.Objective)).forEach(t => objs.push({ n: t.Objective, g: c.goal }));
+      D.tasks.forEach(t => { if (t.Category === c.name && t.Objective && !objs.some(x => x.n === t.Objective)) objs.push({ n: t.Objective, g: c.goal }); });
     });
     rows = objs.map(o => row(o.n, D.tasks.filter(t => t.Objective === o.n), hue(o.g), true));
   }
@@ -512,61 +527,75 @@ async function doReset(kind, btn) {
    ===================================================================== */
 let calCache = {};
 const bookingLink = () => location.origin + location.pathname.replace(/[^/]*$/, '') + 'book.html';
-function viewCalendar() {
-  if (!isAdmin()) return `${pageTop('Calendar')}<div class="empty">The calendar and automatic scheduling are only available to the owner's account.</div>`;
-  if (!SCH() || !SCH().ready) return `${pageTop('Calendar')}<div class="empty">Connect your Google Calendar so My Steps can plan your tasks and show your meetings.<br><br><button class="btn primary" data-act="gconnect">Connect Google Calendar</button></div>`;
-  const st = SST(), cal = calCache.list;
-  if (!cal) loadPlanList();
-  return `${pageTop('Calendar')}
-    <div id="reqs">${reqsHTML()}</div>
-    <div class="cal-bar"><p class="psub" style="margin:0">Your planned tasks, in order. Times and reminders are in Google Calendar.</p>
-      <button class="btn small" data-act="sync" title="Re-plan">↻ Re-plan</button></div>
-    ${cal ? planListHTML(cal) : '<div class="skel"></div><div class="skel"></div>'}
-    <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) : ''}</p>
-    <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
-      <button class="btn small" data-act="copy-link">Copy link</button></div>`;
+const ymdLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const localDay = iso => ymdLocal(new Date(iso));
+function monthGrid(ym) {               // Monday-first weeks covering the month
+  const [y, m] = ym.split('-').map(Number), first = new Date(y, m - 1, 1), last = new Date(y, m, 0);
+  const start = new Date(first); start.setDate(1 - (first.getDay() + 6) % 7);
+  const end = new Date(last); end.setDate(last.getDate() + 7 - (last.getDay() + 6) % 7);
+  const days = []; for (const d = new Date(start); d < end; d.setDate(d.getDate() + 1)) days.push(ymdLocal(d));
+  return { start, end, days };
 }
-function loadPlanList() {
-  if (calCache.p) return;
-  const from = new Date(); from.setHours(0, 0, 0, 0);
-  const to = new Date(from); to.setDate(to.getDate() + 15);
-  const box = calCache, p = box.p = api('calendar', { from: from.toISOString(), to: to.toISOString() })
-    .then(r => { if (box.p === p) box.list = r.cal; })
-    .catch(e => { if (box.p === p) box.list = { blocks: [], error: e.message }; })
+function loadMonth(ym) {
+  const key = 'm' + ym; if (calCache[key]) return;
+  const g = monthGrid(ym), box = calCache, entry = box[key] = {};
+  entry.p = api('calendar', { from: g.start.toISOString(), to: g.end.toISOString() })
+    .then(r => { entry.list = r.cal; }).catch(e => { entry.list = { blocks: [], error: e.message }; })
     .finally(() => { if (calCache === box && S.view === 'calendar') render(); });
 }
-const localDay = iso => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-function dayTitle(day) {
-  const td = today(), diff = dayDiff(day, td);
-  if (diff === 0) return 'Today';
-  if (diff === 1) return 'Tomorrow';
-  return new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
-}
-function planListHTML(cal) {
-  if (cal.error) return `<div class="empty">Could not load your plan: ${esc(cal.error)}<br><br><button class="btn small" data-act="cal-reload">Try again</button></div>`;
-  const td = today(), days = {};
-  // one line per task and day, in the order of its first block that day
+function tasksByDay(cal) {             // day -> [{id, title}] in planned order, one line per task
+  const days = {};
   cal.blocks.slice().sort((a, b) => a.start.localeCompare(b.start)).forEach(b => {
-    const d = localDay(b.start); if (d < td) return;
-    const list = days[d] = days[d] || [];
-    if (!list.some(x => String(x.id) === String(b.taskId))) list.push({ id: String(b.taskId), title: b.title });
+    const d = localDay(b.start), list = days[d] = days[d] || [];
+    if (!list.some(x => x.id === String(b.taskId))) list.push({ id: String(b.taskId), title: b.title });
   });
-  // tasks finished today stay visible (ticked) at the end of today's list
+  const td = today();                  // tasks finished today stay visible, ticked
   S.data.tasks.filter(t => isDone(t) && isScheduled(t) && d10(t['Completed on']) === td).forEach(t => {
     const list = days[td] = days[td] || [];
     if (!list.some(x => x.id === String(t.ID))) list.push({ id: String(t.ID), title: t.Task });
   });
-  const keys = Object.keys(days).sort();
-  if (!keys.length) return '<div class="empty">Nothing planned yet.<br>Switch on 📅 <b>Schedule</b> on a task (it needs hours and a due date).</div>';
-  return keys.map(d => {
-    const rows = days[d].map(x => { const t = S.data.tasks.find(k => String(k.ID) === x.id) || { ID: x.id, Task: x.title };
-      return { t, html: `<div class="ckrow ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
-        <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
-        <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}</div></div>` }; });
-    const open = rows.filter(r => !isDone(r.t)), doneRows = rows.filter(r => isDone(r.t));
-    return `<div class="sec-h"><h2>${esc(dayTitle(d))} <span class="n">${open.length}</span></h2></div>
-      <div class="card cklist">${open.concat(doneRows).map(r => r.html).join('')}</div>`;
+  return days;
+}
+const taskOf = x => S.data.tasks.find(k => String(k.ID) === x.id) || { ID: x.id, Task: x.title, Status: '' };
+function dayTitle(day) {
+  const diff = dayDiff(day, today());
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  if (diff === -1) return 'Yesterday';
+  return new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
+}
+function viewCalendar() {
+  if (!isAdmin()) return `${pageTop('Calendar')}<div class="empty">The calendar and automatic scheduling are only available to the owner's account.</div>`;
+  if (!SCH() || !SCH().ready) return `${pageTop('Calendar')}<div class="empty">Connect your Google Calendar so My Steps can plan your tasks and show your meetings.<br><br><button class="btn primary" data-act="gconnect">Connect Google Calendar</button></div>`;
+  const td = today(), ym = S.calMonth || td.slice(0, 7), sel = S.calDay || td, g = monthGrid(ym);
+  const entry = calCache['m' + ym]; if (!entry) loadMonth(ym);
+  const cal = entry && entry.list, map = cal ? tasksByDay(cal) : {};
+  const title = new Date(ym + '-15T12:00:00').toLocaleDateString([], { month: 'long', year: 'numeric' });
+  const head = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => `<div class="mg-h">${d}</div>`).join('');
+  const cells = g.days.map(d => {
+    const list = (map[d] || []).map(taskOf), shown = list.slice(0, 3);
+    return `<button type="button" class="mg-d ${d.slice(0, 7) !== ym ? 'out' : ''} ${d === td ? 'today' : ''} ${d === sel ? 'sel' : ''}" data-act="cal-day" data-v="${d}">
+      <span class="mg-n">${Number(d.slice(8))}</span>
+      ${shown.map(t => `<span class="mg-t ${isDone(t) ? 'done' : ''}" style="--h:${hue(t['Main goal'])}">${esc(String(t.Task || '').replace(/^[^\p{L}\p{N}]+/u, '') || t.Task)}</span>`).join('')}
+      ${list.length > 3 ? `<span class="mg-more">+${list.length - 3}</span>` : ''}</button>`;
   }).join('');
+  const dayList = (map[sel] || []).map(taskOf), open = dayList.filter(t => !isDone(t)), doneL = dayList.filter(isDone);
+  const rows = open.concat(doneL).map(t => `<div class="ckrow ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
+      <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
+      <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}</div></div>`).join('');
+  const st = SST();
+  return `${pageTop('Calendar')}
+    <div id="reqs">${reqsHTML()}</div>
+    <div class="card mcal">
+      <div class="mg-bar"><button class="ibtn" data-act="cal-prev" aria-label="Previous month">‹</button><b>${esc(title)}</b>
+        <button class="ibtn" data-act="cal-next" aria-label="Next month">›</button><button class="btn small" data-act="cal-today">Today</button></div>
+      ${cal && cal.error ? `<div class="empty">Could not load your plan: ${esc(cal.error)} <button class="btn small" data-act="cal-reload">Try again</button></div>` : ''}
+      <div class="mg ${cal ? '' : 'loading'}">${head}${cells}</div></div>
+    <div class="sec-h"><h2>${esc(dayTitle(sel))} <span class="n">${open.length}</span></h2><button class="link" data-act="sync">↻ Re-plan</button></div>
+    ${!cal ? '<div class="skel"></div>' : rows ? `<div class="card cklist">${rows}</div>` : '<div class="empty">Nothing planned this day.</div>'}
+    <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) + ' · ' : ''}Times and reminders are in Google Calendar.</p>
+    <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
+      <button class="btn small" data-act="copy-link">Copy link</button></div>`;
 }
 function reqsHTML() {
   const list = (S.bookings || []).filter(b => b.status === 'Pending');
@@ -679,7 +708,7 @@ function viewMe() {
       ${isAdmin() ? '<button data-view="sched">Scheduling & booking settings <small>›</small></button><button data-act="sync">Re-plan my schedule now <small>›</small></button>' : ''}
       ${isAdmin() && SUPA ? `<button data-act="gconnect">Google Calendar <small>${SCH() && SCH().connected ? 'connected ✓ · reconnect' : 'connect ›'}</small></button>` : ''}
       <button data-act="refresh">Reload <small>${last ? 'last ' + new Date(last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</small></button>
-      <button data-act="autoemoji">Automatic emoji for new goals & categories <small>${autoEmojiOn() ? 'On' : 'Off'}</small></button>
+      <button data-act="autoemoji">Automatic emoji for new goals, categories & objectives <small>${autoEmojiOn() ? 'On' : 'Off'}</small></button>
       <button data-act="theme">Theme <small>${theme === 'auto' ? 'Automatic' : theme === 'dark' ? 'Dark' : 'Light'}</small></button>
       <button data-act="password">Change password <small>›</small></button>
       <button data-act="logout" style="color:var(--danger)">Log out</button>
@@ -952,7 +981,7 @@ function refill(sel, list, val) { sel.innerHTML = '<option value="">—</option>
 async function addItem(kind) {
   const f = $('#ed'), box = f.querySelector(`.inline-add[data-kind="${kind}"]`), name = box.querySelector('input').value.trim();
   if (!name) return toast('Type a name first');
-  const item = { Name: kind === 'objectives' ? withPrefix(lead(f.Category.value), name) : autoEmoji(name) };
+  const item = { Name: kind === 'objectives' ? objectiveName(f.Category.value, name) : autoEmoji(name, kind) };
   if (kind === 'categories') { if (!f['Main goal'].value) return toast('Choose or create a goal first'); item['Main goal'] = f['Main goal'].value; }
   if (kind === 'objectives') { if (!f.Category.value) return toast('Choose or create a category first'); item.Category = f.Category.value; }
   syncing(true, 'Saving…');
@@ -1096,6 +1125,10 @@ document.addEventListener('click', async e => {
     case 'ptab': S.ptab = a.dataset.v; render(); break;
     case 'ttab': S.tasksTab = a.dataset.v; render(); break;
     case 'cal-reload': calCache = {}; render(); break;
+    case 'cal-day': S.calDay = a.dataset.v; if (a.dataset.v.slice(0, 7) !== (S.calMonth || today().slice(0, 7))) S.calMonth = a.dataset.v.slice(0, 7); render(); break;
+    case 'cal-prev': case 'cal-next': { const [y, m] = (S.calMonth || today().slice(0, 7)).split('-').map(Number), d = new Date(y, m - 1 + (act === 'cal-next' ? 1 : -1), 1);
+      S.calMonth = ymdLocal(d).slice(0, 7); S.calDay = S.calMonth === today().slice(0, 7) ? today() : S.calMonth + '-01'; render(); break; }
+    case 'cal-today': S.calMonth = today().slice(0, 7); S.calDay = today(); render(); break;
     case 'bk-accept': decideBooking(a.closest('[data-bid]').dataset.bid, true); break;
     case 'bk-decline': decideBooking(a.closest('[data-bid]').dataset.bid, false); break;
     case 'copy-link': (navigator.clipboard ? navigator.clipboard.writeText(bookingLink()) : Promise.reject()).then(() => toast('Booking link copied')).catch(() => prompt('Copy this link:', bookingLink())); break;
@@ -1138,7 +1171,7 @@ document.addEventListener('click', async e => {
     case 'refresh': refresh(true); break;
     case 'sync': runSchedule(true, 'full'); break;
     case 'password': openPassword(); break;
-    case 'autoemoji': store.set('tt_autoemoji', !autoEmojiOn()); render(); toast(autoEmojiOn() ? 'New goals and categories get an emoji' : 'Automatic emoji off'); break;
+    case 'autoemoji': store.set('tt_autoemoji', !autoEmojiOn()); render(); toast(autoEmojiOn() ? 'New goals, categories and objectives get their own emoji' : 'Automatic emoji off'); break;
     case 'gconnect': if (SUPA) { syncing(true, 'Opening Google…'); SUPA.connectGoogle().catch(e => { syncing(false); toast(e.message); }); } else toast('Demo mode'); break;
     case 'logout': logout(false); break;
     case 'theme': {
@@ -1154,7 +1187,7 @@ document.addEventListener('click', async e => {
       const f = $('#ed'), cat = f.Category.value; if (!cat) return toast('Choose a category first');
       const name = prompt('New objective in "' + cat + '":', lead(cat) + ' '); if (!name || !name.trim()) return;
       syncing(true, 'Saving…');
-      try { const r = await api('addItem', { kind: 'objectives', item: { Name: name.trim(), Category: cat } }); setData(r.data);
+      try { const r = await api('addItem', { kind: 'objectives', item: { Name: objectiveName(cat, name), Category: cat } }); setData(r.data);
         refill(f.Objective, S.data.objectives.filter(o => o.Category === cat).map(o => o.Name)); f.Objective.value = name.trim(); toast('Objective added'); }
       catch (err) { toast('Not added: ' + err.message); } finally { syncing(false); }
       break;
