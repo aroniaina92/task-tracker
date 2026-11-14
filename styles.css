@@ -427,3 +427,9 @@ details.advanced[open] summary{margin-bottom:10px}
 .set-sum{cursor:pointer;font-weight:600;padding:6px 0;color:var(--muted)}
 .durs{display:flex;gap:10px;flex-wrap:wrap;font-size:14px}
 .durs label{display:inline-flex;gap:4px;align-items:center}
+
+/* Supabase login */
+.gbtn{display:flex;align-items:center;justify-content:center;gap:10px;background:var(--surface);font-weight:600}
+.or{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;margin:14px 0 6px}
+.or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
+.linkbtn{display:block;margin:12px auto 0;background:none;border:0;color:var(--muted);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer}

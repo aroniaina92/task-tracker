@@ -1,5 +1,5 @@
-/* Task Tracker – phone app (GitHub Pages) talking to the Apps Script API.
-   Sheet -> Google Tasks -> Reclaim is handled by the sync script in the sheet. */
+/* My Steps – phone app (GitHub Pages). Data and scheduling live in Supabase (see supa.js);
+   with an empty config.js it runs in demo mode with sample data. */
 (() => {
 'use strict';
 
@@ -7,7 +7,8 @@
    State, storage, API
    ===================================================================== */
 const CFG = window.TT_CONFIG || {};
-const DEMO = !CFG.API_URL;
+const SUPA = window.MyStepsSupa || null;
+const DEMO = !CFG.API_URL && !SUPA;
 const S = {
   token: null, user: null, data: null, view: 'home',
   f: { q: '', scope: 'open', goal: '', cat: '', obj: '' },
@@ -28,6 +29,10 @@ const store = {
 
 async function api(action, payload = {}) {
   if (DEMO) return Demo.call(action, payload);
+  if (SUPA) {
+    try { return await SUPA.call(action, payload); }
+    catch (e) { if (e.auth) { logout(true); throw new Error('Session expired, please log in again'); } throw e; }
+  }
   const res = await fetch(CFG.API_URL, {
     method: 'POST',
     body: JSON.stringify(Object.assign({ action, token: S.token }, payload)) // text/plain: no CORS preflight
@@ -495,7 +500,7 @@ let calCache = {};
 const bookingLink = () => location.origin + location.pathname.replace(/[^/]*$/, '') + 'book.html';
 function viewCalendar() {
   if (!isAdmin()) return `${pageTop('Calendar')}<div class="empty">The calendar and automatic scheduling are only available to the owner's account.</div>`;
-  if (!SCH() || !SCH().ready) return `${pageTop('Calendar')}<div class="empty">Scheduling is not set up yet.<br>Run <b>ttSetupScheduler</b> once in Apps Script (see the setup guide).</div>`;
+  if (!SCH() || !SCH().ready) return `${pageTop('Calendar')}<div class="empty">Connect your Google Calendar so My Steps can plan your tasks and show your meetings.<br><br><button class="btn primary" data-act="gconnect">Connect Google Calendar</button></div>`;
   const v = S.calView || (innerWidth < 700 ? 'timeGridDay' : 'timeGridWeek');
   const tab = (k, l) => `<button type="button" data-act="cal-view" data-v="${k}" aria-pressed="${v === k}">${l}</button>`;
   const legend = SCH().categories.map(c => `<span class="lg-item"><i style="background:${esc(c.color)}"></i>${esc(c.name)}</span>`).join('') +
@@ -634,7 +639,7 @@ function viewSched() {
       <label class="field"><span class="lab">Your name on the page</span><input data-b="ownerName" value="${esc(B.ownerName)}"></label>
       <label class="field"><span class="lab">Meeting title</span><input data-b="title" value="${esc(B.title)}"></label>
       <div class="share"><div><b>Link</b><small>${esc(bookingLink())}</small></div><button class="btn small" data-act="copy-link">Copy</button></div></div>
-    <p class="note">Today: ${u.runs || 0} scheduler runs · ${Math.round((u.seconds || 0) / 60)} min · ${u.writes || 0} calendar changes.</p>
+    <p class="note">${u.lastRun ? 'Last plan: ' + new Date(u.lastRun).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) + ' · ' + (u.writes || 0) + ' calendar changes.' : u.runs !== undefined ? `Today: ${u.runs || 0} scheduler runs · ${u.writes || 0} calendar changes.` : ''}</p>
     <button class="btn primary block" data-act="set-save" style="margin-top:8px">Save and re-plan</button>`;
 }
 function collectSettings() {
@@ -673,21 +678,22 @@ function viewMe() {
       <div><div style="font-weight:700">${esc(u.name || '')}</div><div class="note" style="margin:0">${esc(u.email)}${isAdmin() ? ' · owner' : ''}</div></div></div>
     <div class="card menu">
       ${isAdmin() ? '<button data-view="sched">Scheduling & booking settings <small>›</small></button><button data-act="sync">Re-plan my schedule now <small>›</small></button>' : ''}
-      <button data-act="refresh">Reload from the sheet <small>${last ? 'last ' + new Date(last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</small></button>
+      ${isAdmin() && SUPA ? `<button data-act="gconnect">Google Calendar <small>${SCH() && SCH().connected ? 'connected ✓ · reconnect' : 'connect ›'}</small></button>` : ''}
+      <button data-act="refresh">Reload <small>${last ? 'last ' + new Date(last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</small></button>
       <button data-act="theme">Theme <small>${theme === 'auto' ? 'Automatic' : theme === 'dark' ? 'Dark' : 'Light'}</small></button>
       <button data-act="password">Change password <small>›</small></button>
       <button data-act="logout" style="color:var(--danger)">Log out</button>
     </div>
-    ${DEMO ? '<p class="note">Demo mode: changes are not saved. Add your Apps Script URL in config.js.</p>' : ''}
+    ${DEMO ? '<p class="note">Demo mode: changes are not saved. Add your Supabase details in config.js.</p>' : ''}
     <details class="advanced" ${S.advOpen ? 'open' : ''}><summary>Advanced</summary>
       <div class="card menu">
         <button data-act="reset-open" data-v="objective">Reset objectives, categories or goals <small>›</small></button>
         <button data-act="reset-open" data-v="completed">Clean up completed objectives or categories <small>›</small></button>
         <button data-act="reset-open" data-v="all" style="color:var(--danger)">Reset everything <small>›</small></button>
       </div>
-      <p class="note">Resetting deletes tasks for good and removes them from Google Tasks / Reclaim. You choose whether the reset items themselves are kept (so you don't re-enter them) or removed too.</p>
+      <p class="note">Resetting deletes tasks for good and removes their blocks from your calendar. You choose whether the reset items themselves are kept (so you don't re-enter them) or removed too.</p>
     </details>
-    ${isAdmin() ? '' : '<p class="note">Your tasks are private to your account. Reclaim scheduling is only available to the owner.</p>'}`;
+    ${isAdmin() ? '' : '<p class="note">Your tasks are private to your account. Automatic scheduling is only available to the owner.</p>'}`;
 }
 
 /* =====================================================================
@@ -699,15 +705,28 @@ function viewLogin(msg = '') {
     <img class="logo-wide" src="icons/logo.png" alt="ARO∞ logo">
     <h1>My Steps</h1><p>Log in to see your day.</p>
     ${DEMO ? '<div class="demo">Demo mode: any email and password work. Sample data only.</div>' : ''}
+    ${SUPA ? `<button type="button" class="btn block gbtn" id="gLogin"><svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.5l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.8 6C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.7c4.3-4 6.9-9.9 6.9-17.1z"/><path fill="#FBBC05" d="M10.5 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.3.8-4.7l-7.8-6C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.7c-2.1 1.4-4.8 2.2-8.5 2.2-6.3 0-11.6-4.1-13.5-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg> Continue with Google</button>
+      <div class="or"><span>or</span></div>` : ''}
     <label class="field">Email<input name="email" type="email" required autocomplete="username"></label>
     <label class="field">Password<input name="password" type="password" required autocomplete="current-password"></label>
     <div class="err" id="loginErr">${esc(msg)}</div>
-    <button class="btn primary block" id="loginBtn">Log in</button></form></div>`;
+    <button class="btn primary block" id="loginBtn">Log in</button>
+    ${SUPA ? '<button type="button" class="linkbtn" id="forgot">Forgot password?</button>' : ''}</form></div>`;
+  if (SUPA) {
+    $('#gLogin').onclick = () => { $('#gLogin').disabled = true; SUPA.signInGoogle().catch(e => { $('#loginErr').textContent = e.message; $('#gLogin').disabled = false; }); };
+    $('#forgot').onclick = async () => {
+      const email = $('#loginForm').email.value.trim();
+      if (!email) { $('#loginErr').textContent = 'Type your email first, then tap "Forgot password?"'; return; }
+      try { await SUPA.resetPassword(email); $('#loginErr').textContent = ''; toast('Check your email for a link to choose a new password'); }
+      catch (e) { $('#loginErr').textContent = e.message; }
+    };
+  }
   $('#loginForm').onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target), btn = $('#loginBtn');
     btn.disabled = true; btn.textContent = 'Logging in…';
     try {
+      if (SUPA) { S.user = await SUPA.signIn(String(fd.get('email')).trim(), fd.get('password')); S.token = 'supabase'; store.set('tt_auth', { token: S.token, user: S.user }); start(); return; }
       const r = DEMO ? await Demo.call('login', {}) : await (await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify({ action: 'login', email: fd.get('email'), password: fd.get('password') }) })).json();
       if (!r.ok) throw new Error(r.error);
       S.token = r.token; S.user = r.user; store.set('tt_auth', { token: r.token, user: r.user });
@@ -1027,13 +1046,13 @@ function planBody() {
     ${rows || '<div class="empty">No open tasks here.</div>'}`;
 }
 
-function openPassword() {
-  openSheet('Change password', `<form id="pw" onsubmit="return false">
-    <label class="field">Current password<input type="password" name="old" autocomplete="current-password"></label>
+function openPassword(recovery) {
+  openSheet(recovery ? 'Choose a new password' : 'Change password', `<form id="pw" onsubmit="return false">
+    ${recovery ? '' : '<label class="field">Current password<input type="password" name="old" autocomplete="current-password"></label>'}
     <label class="field">New password (8+ characters)<input type="password" name="nw" autocomplete="new-password"></label>
     <div class="err" id="pwErr"></div></form>`, async () => {
     const f = $('#pw');
-    try { await api('password', { oldPassword: f.old.value, newPassword: f.nw.value }); closeSheet(); toast('Password changed'); }
+    try { await api('password', { oldPassword: f.old ? f.old.value : '', newPassword: f.nw.value, recovery: !!recovery }); closeSheet(); toast('Password changed'); }
     catch (e) { $('#pwErr').textContent = e.message; }
   });
 }
@@ -1118,13 +1137,14 @@ document.addEventListener('click', async e => {
     case 'refresh': refresh(true); break;
     case 'sync': runSchedule(true, 'full'); break;
     case 'password': openPassword(); break;
+    case 'gconnect': if (SUPA) { syncing(true, 'Opening Google…'); SUPA.connectGoogle().catch(e => { syncing(false); toast(e.message); }); } else toast('Demo mode'); break;
     case 'logout': logout(false); break;
     case 'theme': {
       const order = ['auto', 'light', 'dark'], cur = store.get('tt_theme') || 'auto', next = order[(order.indexOf(cur) + 1) % 3];
       store.set('tt_theme', next); applyTheme(); render(); break;
     }
     case 'delete':
-      if (!confirm('Delete "' + S.editing.Task + '"? This removes it from the sheet.')) return;
+      if (!confirm('Delete "' + S.editing.Task + '"? This deletes it for good.')) return;
       { const id = S.editing.ID; closeSheet(); S.data.tasks = S.data.tasks.filter(x => x.ID !== id); render(); syncing(true, 'Deleting…');
         try { const r = await api('delete', { id }); setData(r.data); render(); toast('Deleted'); } catch (err) { toast('Not deleted: ' + err.message); refresh(false); } finally { syncing(false); } }
       break;
@@ -1290,6 +1310,21 @@ const Demo = (() => {
    ===================================================================== */
 applyTheme();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
-const auth = store.get('tt_auth');
-if (auth && auth.token) { S.token = auth.token; S.user = auth.user; start(); } else viewLogin();
+if (SUPA) {
+  $('#app').innerHTML = '<div class="page"><div class="skel"></div><div class="skel"></div></div>';
+  SUPA.boot().then(r => {
+    if (!r.user) { store.del('tt_auth'); viewLogin(); return; }
+    S.token = 'supabase'; S.user = { email: r.user.email, name: r.user.name, role: r.user.role }; store.set('tt_auth', { token: S.token, user: S.user });
+    start();
+    if (r.connected) toast('Google Calendar connected · planning your tasks');
+    if (r.connectError) toast('Google Calendar: ' + r.connectError);
+    if (r.recovery) setTimeout(() => openPassword(true), 300);
+  }).catch(() => {
+    const auth = store.get('tt_auth');               // offline: show the saved copy
+    if (auth && auth.user) { S.token = auth.token; S.user = auth.user; start(); } else viewLogin('Could not reach the server. Check your connection.');
+  });
+} else {
+  const auth = store.get('tt_auth');
+  if (auth && auth.token) { S.token = auth.token; S.user = auth.user; start(); } else viewLogin();
+}
 })();

@@ -1,7 +1,9 @@
 /* Public booking page: shows free time in the owner's booking hours and sends a request. */
 (() => {
 'use strict';
-const API = (window.TT_CONFIG || {}).API_URL;
+const CFG = window.TT_CONFIG || {};
+const API = CFG.SUPABASE_URL ? CFG.SUPABASE_URL.replace(/\/+$/, '') + '/functions/v1/booking' : CFG.API_URL;
+const ACTIONS = CFG.SUPABASE_URL ? { bookingSlots: 'slots', bookingRequest: 'request' } : {};
 const OWNER_TZ = 'Indian/Antananarivo';
 const ME_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const $ = s => document.querySelector(s);
@@ -10,7 +12,9 @@ const B = { data: null, minutes: 30, day: null, slot: null, sending: false };
 
 async function call(action, payload) {
   if (!API) return demo(action, payload);
-  const r = await fetch(API, { method: 'POST', body: JSON.stringify(Object.assign({ action }, payload || {})) });
+  const r = CFG.SUPABASE_URL
+    ? await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: CFG.SUPABASE_ANON_KEY }, body: JSON.stringify(Object.assign({ action: ACTIONS[action] }, payload || {})) })
+    : await fetch(API, { method: 'POST', body: JSON.stringify(Object.assign({ action }, payload || {})) });
   const j = await r.json(); if (!j.ok) throw new Error(j.error || 'Server error'); return j;
 }
 const fmt = (ms, tz, opts) => new Intl.DateTimeFormat(undefined, Object.assign({ timeZone: tz }, opts)).format(new Date(ms));
@@ -75,7 +79,7 @@ async function load() {
   catch (e) { $('#sub').textContent = ''; $('#body').innerHTML = '<div class="card empty">Could not load the available times. Please refresh the page.</div>'; }
 }
 
-/* Demo (no API_URL in config.js): sample free time */
+/* Demo (empty config.js): sample free time */
 function demo(action) {
   const wait = v => new Promise(r => setTimeout(() => r(v), 300));
   if (action === 'bookingRequest') return wait({ ok: true });

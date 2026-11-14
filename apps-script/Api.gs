@@ -17,7 +17,7 @@
 
 const TT = {
   // Tasks/goals/categories/objectives with an EMPTY Owner belong to this account.
-  ADMIN_EMAIL: 'aroofalinirina@gmail.com', // <- put your email here (in Apps Script only, not in GitHub)
+  ADMIN_EMAIL: 'YOUR_EMAIL@gmail.com', // <- put your email here (in Apps Script only, not in GitHub)
   SESSION_DAYS: 90,
   HASH_ROUNDS: 400,
   SHEETS: { tasks: 'Tasks', goals: 'Goals', categories: 'Categories', objectives: 'Objectives', users: 'Users', ideas: 'Ideas' },
