@@ -1,6 +1,6 @@
 {
-  "name": "My Steps",
-  "short_name": "My Steps",
+  "name": "ArooTaskTracker",
+  "short_name": "ArooTaskTracker",
   "description": "Daily progress, tasks and ideas",
   "start_url": "./",
   "scope": "./",

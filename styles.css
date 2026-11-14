@@ -268,7 +268,8 @@ details.closed summary{cursor:pointer;color:var(--muted);font-size:13px;padding:
 
 html{background:#0a3d5a}
 body{background:none}
-body::before{content:"";position:fixed;inset:0;z-index:-2;background:#2a96a6 url("bg/reef.svg") center bottom / cover no-repeat}
+body::before{content:"";position:fixed;inset:0;z-index:-2;background:#0e5a78 url("bg/reef.jpg") 30% center / cover no-repeat;background-image:image-set(url("bg/reef.webp") type("image/webp"),url("bg/reef.jpg") type("image/jpeg"))}
+body::after{content:"";position:fixed;inset:0;z-index:-1;background:linear-gradient(180deg,rgba(4,40,60,.25),rgba(4,30,48,.15) 40%,rgba(4,24,40,.35))}
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) body::after{content:"";position:fixed;inset:0;z-index:-1;background:rgba(2,14,22,.45)} }
 :root[data-theme="dark"] body::after{content:"";position:fixed;inset:0;z-index:-1;background:rgba(2,14,22,.45)}
 
@@ -309,7 +310,7 @@ body::before{content:"";position:fixed;inset:0;z-index:-2;background:#2a96a6 url
 .nav .add{width:50px;height:50px;border-radius:18px}
 
 /* ===== Login logo ===== */
-.logo-wide{display:block;width:100%;max-width:260px;height:auto;margin:0 auto 14px}
+.logo-wide{display:block;width:112px;height:112px;margin:0 auto 14px;border-radius:50%;box-shadow:0 0 0 4px rgba(255,255,255,.85),0 8px 24px rgba(4,30,45,.3)}
 
 /* ===== Week chart (percentages) ===== */
 .week-card{margin-top:14px;padding-bottom:10px}
@@ -433,3 +434,14 @@ details.advanced[open] summary{margin-bottom:10px}
 .or{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;margin:14px 0 6px}
 .or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
 .linkbtn{display:block;margin:12px auto 0;background:none;border:0;color:var(--muted);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer}
+
+/* Calendar page: checklist of planned tasks per day */
+.cal-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+.cklist{padding:4px 0}
+.ckrow{display:flex;align-items:center;gap:12px;padding:12px 14px;border-left:4px solid hsl(var(--h,180) 55% 50%)}
+.ckrow + .ckrow{border-top:1px solid var(--line)}
+.ckrow .ck-name{flex:1;min-width:0;font-weight:600;line-height:1.35;cursor:pointer}
+.ckrow.done .tick{background:var(--ok);border-color:var(--ok);color:#fff}
+.ckrow.done .ck-name{color:var(--muted);text-decoration:line-through;font-weight:500}
+.ckrow.doing .ck-name::before{content:"▶ ";color:var(--coral)}
+.ck-risk{color:var(--danger);font-size:13px}

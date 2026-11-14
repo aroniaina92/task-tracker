@@ -83,6 +83,20 @@ function withPrefix(prefix, text) {
   const emo = own.startsWith(prefix) ? own : prefix + own;
   return rest ? emo + ' ' + rest : emo;
 }
+// New goal or category typed without an emoji: give it one not used yet (can be switched off in Me)
+const EMOJI_POOL = ['🌊', '🐠', '🐢', '🪸', '🐚', '🌿', '🌱', '🐋', '🦀', '🐙', '🐬', '⛵', '🧭', '📚', '🧪', '🔬', '📊', '📈', '💼', '🎯',
+  '📝', '💡', '🛠', '🎓', '🏠', '💰', '🤝', '🎵', '📷', '🌍', '🚀', '🧩', '🗓', '⭐', '🔥', '🌺', '🍀', '☀', '🌙', '🏃',
+  '🎨', '🍽', '✈', '🧘', '📣', '💻', '🔧', '🦋', '🐝', '🌴', '🏝', '🐟', '🦐', '🌻', '🍎', '📦', '🔑', '🎤', '🧳', '🏆'];
+const autoEmojiOn = () => store.get('tt_autoemoji') !== false;
+function autoEmoji(name) {
+  name = String(name || '').trim();
+  if (!autoEmojiOn() || !name || lead(name)) return name;
+  const clean = x => String(x || '').replace(/[\uFE0F\s]/g, '');
+  const used = new Set(S.data.goals.concat(S.data.categories).map(x => clean(lead(x.Name))).filter(Boolean));
+  const free = EMOJI_POOL.filter(e => ![...used].some(u => u.includes(e)));
+  const pick = free.length ? free[0] : EMOJI_POOL[Math.floor(Math.random() * EMOJI_POOL.length)];
+  return pick + ' ' + name;
+}
 function okToSend(t) {
   if (hrs(t) > 0) return true;
   toast('Add estimated hours first, so the scheduler knows how much time to plan'); openEditor(t); return false;
@@ -316,7 +330,7 @@ function viewProjects() {
     rows = catOrder().map(c => row(c.name, D.tasks.filter(t => t.Category === c.name), hue(c.goal)));
   } else {
     const objs = []; catOrder().forEach(c => {
-      D.objectives.filter(o => o.Category === c.name).forEach(o => objs.push({ n: o.Name, g: c.goal }));
+      D.objectives.filter(o => o.Category === c.name && !objs.some(x => x.n === o.Name)).forEach(o => objs.push({ n: o.Name, g: c.goal }));
       D.tasks.filter(t => t.Category === c.name && t.Objective && !objs.some(x => x.n === t.Objective)).forEach(t => objs.push({ n: t.Objective, g: c.goal }));
     });
     rows = objs.map(o => row(o.n, D.tasks.filter(t => t.Objective === o.n), hue(o.g), true));
@@ -336,7 +350,7 @@ function viewProjects() {
 function catOrder() {
   // categories in goal order, then any category only found in tasks
   const D = S.data, out = [];
-  D.goals.forEach(g => D.categories.filter(c => c['Main goal'] === g.Name).forEach(c => out.push({ name: c.Name, goal: g.Name })));
+  D.goals.forEach(g => D.categories.filter(c => c['Main goal'] === g.Name && !out.some(o => o.name === c.Name)).forEach(c => out.push({ name: c.Name, goal: g.Name })));
   D.categories.forEach(c => { if (!out.some(o => o.name === c.Name)) out.push({ name: c.Name, goal: c['Main goal'] }); });
   D.tasks.forEach(t => { if (t.Category && !out.some(o => o.name === t.Category)) out.push({ name: t.Category, goal: t['Main goal'] }); });
   return out;
@@ -501,20 +515,58 @@ const bookingLink = () => location.origin + location.pathname.replace(/[^/]*$/, 
 function viewCalendar() {
   if (!isAdmin()) return `${pageTop('Calendar')}<div class="empty">The calendar and automatic scheduling are only available to the owner's account.</div>`;
   if (!SCH() || !SCH().ready) return `${pageTop('Calendar')}<div class="empty">Connect your Google Calendar so My Steps can plan your tasks and show your meetings.<br><br><button class="btn primary" data-act="gconnect">Connect Google Calendar</button></div>`;
-  const v = S.calView || (innerWidth < 700 ? 'timeGridDay' : 'timeGridWeek');
-  const tab = (k, l) => `<button type="button" data-act="cal-view" data-v="${k}" aria-pressed="${v === k}">${l}</button>`;
-  const legend = SCH().categories.map(c => `<span class="lg-item"><i style="background:${esc(c.color)}"></i>${esc(c.name)}</span>`).join('') +
-    '<span class="lg-item"><i class="busy"></i>Busy</span><span class="lg-item"><i class="req"></i>Request</span>';
-  const st = SST();
+  const st = SST(), cal = calCache.list;
+  if (!cal) loadPlanList();
   return `${pageTop('Calendar')}
     <div id="reqs">${reqsHTML()}</div>
-    <div class="cal-bar"><div class="seg">${tab('timeGridDay', 'Day')}${tab('timeGrid3', '3 days')}${tab('timeGridWeek', 'Week')}</div>
+    <div class="cal-bar"><p class="psub" style="margin:0">Your planned tasks, in order. Times and reminders are in Google Calendar.</p>
       <button class="btn small" data-act="sync" title="Re-plan">↻ Re-plan</button></div>
-    <div class="card cal-card"><div id="fc"></div></div>
-    <div class="legend">${legend}</div>
-    <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) + ' · ' : ''}Drag a task block to move it: it stays where you put it (📌). Tap it to open the task.</p>
+    ${cal ? planListHTML(cal) : '<div class="skel"></div><div class="skel"></div>'}
+    <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) : ''}</p>
     <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
       <button class="btn small" data-act="copy-link">Copy link</button></div>`;
+}
+function loadPlanList() {
+  if (calCache.p) return;
+  const from = new Date(); from.setHours(0, 0, 0, 0);
+  const to = new Date(from); to.setDate(to.getDate() + 15);
+  const box = calCache, p = box.p = api('calendar', { from: from.toISOString(), to: to.toISOString() })
+    .then(r => { if (box.p === p) box.list = r.cal; })
+    .catch(e => { if (box.p === p) box.list = { blocks: [], error: e.message }; })
+    .finally(() => { if (calCache === box && S.view === 'calendar') render(); });
+}
+const localDay = iso => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function dayTitle(day) {
+  const td = today(), diff = dayDiff(day, td);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  return new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
+}
+function planListHTML(cal) {
+  if (cal.error) return `<div class="empty">Could not load your plan: ${esc(cal.error)}<br><br><button class="btn small" data-act="cal-reload">Try again</button></div>`;
+  const td = today(), days = {};
+  // one line per task and day, in the order of its first block that day
+  cal.blocks.slice().sort((a, b) => a.start.localeCompare(b.start)).forEach(b => {
+    const d = localDay(b.start); if (d < td) return;
+    const list = days[d] = days[d] || [];
+    if (!list.some(x => String(x.id) === String(b.taskId))) list.push({ id: String(b.taskId), title: b.title });
+  });
+  // tasks finished today stay visible (ticked) at the end of today's list
+  S.data.tasks.filter(t => isDone(t) && isScheduled(t) && d10(t['Completed on']) === td).forEach(t => {
+    const list = days[td] = days[td] || [];
+    if (!list.some(x => x.id === String(t.ID))) list.push({ id: String(t.ID), title: t.Task });
+  });
+  const keys = Object.keys(days).sort();
+  if (!keys.length) return '<div class="empty">Nothing planned yet.<br>Switch on 📅 <b>Schedule</b> on a task (it needs hours and a due date).</div>';
+  return keys.map(d => {
+    const rows = days[d].map(x => { const t = S.data.tasks.find(k => String(k.ID) === x.id) || { ID: x.id, Task: x.title };
+      return { t, html: `<div class="ckrow ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
+        <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
+        <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}</div></div>` }; });
+    const open = rows.filter(r => !isDone(r.t)), doneRows = rows.filter(r => isDone(r.t));
+    return `<div class="sec-h"><h2>${esc(dayTitle(d))} <span class="n">${open.length}</span></h2></div>
+      <div class="card cklist">${open.concat(doneRows).map(r => r.html).join('')}</div>`;
+  }).join('');
 }
 function reqsHTML() {
   const list = (S.bookings || []).filter(b => b.status === 'Pending');
@@ -527,59 +579,6 @@ function reqsHTML() {
 }
 async function loadBookings() {
   try { const r = await api('bookings'); S.bookings = r.bookings; const el = $('#reqs'); if (el) el.innerHTML = reqsHTML(); } catch (e) {}
-}
-function catColorOf(taskId) { const t = S.data.tasks.find(x => String(x.ID) === String(taskId)); const c = t && timeCat(t); return c ? c.color : '#0a8f8a'; }
-async function loadCal(info) {
-  const key = info.startStr + '|' + info.endStr;
-  if (!calCache[key]) calCache[key] = api('calendar', { from: info.start.toISOString(), to: info.end.toISOString() }).then(r => r.cal);
-  let cal;
-  try { cal = await calCache[key]; } catch (e) { delete calCache[key]; throw e; }
-  const ev = [];
-  cal.windows.forEach(w => ev.push({ start: w.start, end: w.end, display: 'background', backgroundColor: w.color, classNames: ['win'] }));
-  cal.main.forEach(m => ev.push({ title: m.title, start: m.start, end: m.end, allDay: m.allDay, editable: false, classNames: ['ev-busy'], extendedProps: { kind: 'busy' } }));
-  cal.blocks.forEach(b => { const c = catColorOf(b.taskId);
-    ev.push({ id: b.id, title: (b.pinned ? '📌 ' : '') + b.title, start: b.start, end: b.end, editable: true, backgroundColor: c, borderColor: c,
-      classNames: ['ev-task'], extendedProps: { kind: 'task', taskId: b.taskId, pinned: b.pinned } }); });
-  (cal.bookings || []).filter(b => b.status === 'Pending').forEach(b => ev.push({ title: '⏳ ' + b.name + ' (' + b.minutes + ' min)', start: b.start, end: b.end,
-    editable: false, classNames: ['ev-req'], extendedProps: { kind: 'booking', id: b.id } }));
-  return ev;
-}
-let fcTries = 0;
-function mountCalendar() {
-  const el = $('#fc'); if (!el) return;
-  if (!window.FullCalendar) {
-    if (fcTries++ < 40) { setTimeout(() => S.view === 'calendar' && mountCalendar(), 250); }
-    else el.innerHTML = '<div class="empty">The calendar could not load. Check your connection.</div>';
-    return;
-  }
-  fcTries = 0;
-  if (S.fc) { try { S.fc.destroy(); } catch (e) {} }
-  const move = info => {
-    syncing(true, 'Moving…');
-    api('moveBlock', { id: info.event.id, start: info.event.start.toISOString(), end: info.event.end.toISOString() })
-      .then(() => { calCache = {}; S.fc && S.fc.refetchEvents(); toast('Moved and pinned 📌'); return refresh(false); })
-      .catch(e => { info.revert(); toast('Not moved: ' + e.message); })
-      .finally(() => syncing(false));
-  };
-  S.fc = new FullCalendar.Calendar(el, {
-    initialView: S.calView || (innerWidth < 700 ? 'timeGridDay' : 'timeGridWeek'),
-    initialDate: S.calDate || undefined,
-    views: { timeGrid3: { type: 'timeGrid', duration: { days: 3 } } },
-    headerToolbar: { left: 'prev,next', center: 'title', right: 'today' },
-    firstDay: 1, height: 'auto', slotMinTime: '04:00:00', slotMaxTime: '22:00:00', slotDuration: '00:30:00',
-    nowIndicator: true, allDaySlot: true, eventMinHeight: 18, snapDuration: '00:15:00', longPressDelay: 350,
-    slotLabelFormat: { hour: '2-digit', minute: '2-digit', hour12: false }, eventTimeFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
-    eventSources: [{ events: (info, ok, fail) => { loadCal(info).then(ok).catch(e => { toast('Calendar: ' + e.message); fail(e); }); } }],
-    eventDrop: move, eventResize: move,
-    eventClick: info => {
-      const k = info.event.extendedProps.kind;
-      if (k === 'task') { const t = S.data.tasks.find(x => String(x.ID) === String(info.event.extendedProps.taskId)); if (t) openEditor(t); }
-      else if (k === 'booking') { const r = $(`[data-bid="${info.event.extendedProps.id}"]`); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
-      else toast(info.event.title);
-    },
-    datesSet: info => { S.calDate = info.view.currentStart; S.calView = info.view.type; }
-  });
-  S.fc.render();
 }
 async function decideBooking(id, accept) {
   const b = (S.bookings || []).find(x => x.id === id); if (!b) return;
@@ -680,6 +679,7 @@ function viewMe() {
       ${isAdmin() ? '<button data-view="sched">Scheduling & booking settings <small>›</small></button><button data-act="sync">Re-plan my schedule now <small>›</small></button>' : ''}
       ${isAdmin() && SUPA ? `<button data-act="gconnect">Google Calendar <small>${SCH() && SCH().connected ? 'connected ✓ · reconnect' : 'connect ›'}</small></button>` : ''}
       <button data-act="refresh">Reload <small>${last ? 'last ' + new Date(last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</small></button>
+      <button data-act="autoemoji">Automatic emoji for new goals & categories <small>${autoEmojiOn() ? 'On' : 'Off'}</small></button>
       <button data-act="theme">Theme <small>${theme === 'auto' ? 'Automatic' : theme === 'dark' ? 'Dark' : 'Light'}</small></button>
       <button data-act="password">Change password <small>›</small></button>
       <button data-act="logout" style="color:var(--danger)">Log out</button>
@@ -702,7 +702,7 @@ function viewMe() {
 function viewLogin(msg = '') {
   $('#nav').classList.add('hidden');
   $('#app').innerHTML = `<div class="login"><form class="card" id="loginForm" autocomplete="on">
-    <img class="logo-wide" src="icons/logo.png" alt="ARO∞ logo">
+    <img class="logo-wide" src="icons/logo.png" alt="Aroo">
     <h1>My Steps</h1><p>Log in to see your day.</p>
     ${DEMO ? '<div class="demo">Demo mode: any email and password work. Sample data only.</div>' : ''}
     ${SUPA ? `<button type="button" class="btn block gbtn" id="gLogin"><svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.5l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.8 6C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.7c4.3-4 6.9-9.9 6.9-17.1z"/><path fill="#FBBC05" d="M10.5 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.3.8-4.7l-7.8-6C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.7c-2.1 1.4-4.8 2.2-8.5 2.2-6.3 0-11.6-4.1-13.5-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg> Continue with Google</button>
@@ -750,11 +750,12 @@ function render() {
   $('#app').innerHTML = `<main class="page">${VIEWS[S.view]()}</main>`;
   document.querySelectorAll('#nav [data-view]').forEach(b => b.setAttribute('aria-current', b.dataset.view === S.view || (b.dataset.view === 'tasks' && S.view === 'easy')));
   const dot = document.querySelector('#nav [data-view="calendar"]'); if (dot) dot.classList.toggle('has-dot', !!(SCH() && SCH().pendingBookings));
-  if (S.view === 'calendar' && isAdmin() && SCH() && SCH().ready) { mountCalendar(); if (!S.bookingsLoaded) { S.bookingsLoaded = true; loadBookings(); } }
-  else if (S.fc) { try { S.fc.destroy(); } catch (e) {} S.fc = null; }
+  if (S.view === 'calendar' && isAdmin() && SCH() && SCH().ready && !S.bookingsLoaded) { S.bookingsLoaded = true; loadBookings(); }
   if (focus) { const i = $(`[data-f="${focus}"]`); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
 }
-function setData(d) { S.data = d; store.set('tt_cache_' + S.user.email, d); store.set('tt_last_' + S.user.email, Date.now()); }
+const nameKey = x => String(x || '').normalize('NFC').replace(/[\uFE0F\s]+/g, '').toLowerCase();
+function uniqNames(list) { const seen = new Set(); return (list || []).filter(x => { const k = nameKey(x.Name); if (!k || seen.has(k)) return false; seen.add(k); return true; }); }
+function setData(d) { if (d) { d.goals = uniqNames(d.goals); d.categories = uniqNames(d.categories); d.objectives = uniqNames(d.objectives); } S.data = d; store.set('tt_cache_' + S.user.email, d); store.set('tt_last_' + S.user.email, Date.now()); }
 async function refresh(showSpinner) {
   if (showSpinner) syncing(true, 'Loading…');
   try { const r = await api('data'); setData(r.data); render(); }
@@ -765,7 +766,7 @@ function start() {
   $('#nav').classList.remove('hidden');
   S.view = 'home'; resetHistory();
   const cached = store.get('tt_cache_' + S.user.email);
-  if (cached) { S.data = cached; render(); refresh(false); }
+  if (cached) { setData(cached); render(); refresh(false); }
   else { render(); refresh(true); }
 }
 async function save(partial, msg) {
@@ -794,7 +795,7 @@ function runSchedule(loud, mode) {
   const job = schedBusy = { again: false };
   job.p = api('schedule', { mode: mode || 'incremental' })
     .then(() => { calCache = {}; return refresh(false); })
-    .then(() => { if (loud) toast('Schedule updated'); if (S.view === 'calendar' && S.fc) S.fc.refetchEvents(); })
+    .then(() => { if (loud) toast('Schedule updated'); })
     .catch(e => { if (loud) toast('Scheduling failed: ' + e.message); })
     .finally(() => { if (loud) syncing(false); schedBusy = null; if (job.again) runSchedule(false); });
   return job;
@@ -951,14 +952,14 @@ function refill(sel, list, val) { sel.innerHTML = '<option value="">—</option>
 async function addItem(kind) {
   const f = $('#ed'), box = f.querySelector(`.inline-add[data-kind="${kind}"]`), name = box.querySelector('input').value.trim();
   if (!name) return toast('Type a name first');
-  const item = { Name: kind === 'objectives' ? withPrefix(lead(f.Category.value), name) : name };
+  const item = { Name: kind === 'objectives' ? withPrefix(lead(f.Category.value), name) : autoEmoji(name) };
   if (kind === 'categories') { if (!f['Main goal'].value) return toast('Choose or create a goal first'); item['Main goal'] = f['Main goal'].value; }
   if (kind === 'objectives') { if (!f.Category.value) return toast('Choose or create a category first'); item.Category = f.Category.value; }
   syncing(true, 'Saving…');
   try {
     const r = await api('addItem', { kind, item }); setData(r.data);
-    if (kind === 'goals') { refill(f['Main goal'], S.data.goals.map(g => g.Name), name); refill(f.Category, []); refill(f.Objective, []); }
-    if (kind === 'categories') { refill(f.Category, catsOf(f['Main goal'].value), name); refill(f.Objective, []); }
+    if (kind === 'goals') { refill(f['Main goal'], S.data.goals.map(g => g.Name), item.Name); refill(f.Category, []); refill(f.Objective, []); }
+    if (kind === 'categories') { refill(f.Category, catsOf(f['Main goal'].value), item.Name); refill(f.Objective, []); }
     if (kind === 'objectives') refill(f.Objective, objsOf(f.Category.value), item.Name);
     box.classList.add('hidden'); box.querySelector('input').value = '';
     f.querySelectorAll('.field.invalid').forEach(x => x.classList.remove('invalid'));
@@ -1094,7 +1095,7 @@ document.addEventListener('click', async e => {
     case 'plan-back': history.back(); break;
     case 'ptab': S.ptab = a.dataset.v; render(); break;
     case 'ttab': S.tasksTab = a.dataset.v; render(); break;
-    case 'cal-view': S.calView = a.dataset.v; if (S.fc) { S.fc.changeView(a.dataset.v); a.parentElement.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', b === a)); } break;
+    case 'cal-reload': calCache = {}; render(); break;
     case 'bk-accept': decideBooking(a.closest('[data-bid]').dataset.bid, true); break;
     case 'bk-decline': decideBooking(a.closest('[data-bid]').dataset.bid, false); break;
     case 'copy-link': (navigator.clipboard ? navigator.clipboard.writeText(bookingLink()) : Promise.reject()).then(() => toast('Booking link copied')).catch(() => prompt('Copy this link:', bookingLink())); break;
@@ -1137,6 +1138,7 @@ document.addEventListener('click', async e => {
     case 'refresh': refresh(true); break;
     case 'sync': runSchedule(true, 'full'); break;
     case 'password': openPassword(); break;
+    case 'autoemoji': store.set('tt_autoemoji', !autoEmojiOn()); render(); toast(autoEmojiOn() ? 'New goals and categories get an emoji' : 'Automatic emoji off'); break;
     case 'gconnect': if (SUPA) { syncing(true, 'Opening Google…'); SUPA.connectGoogle().catch(e => { syncing(false); toast(e.message); }); } else toast('Demo mode'); break;
     case 'logout': logout(false); break;
     case 'theme': {

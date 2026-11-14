@@ -8,7 +8,7 @@ Data and server logic run on Supabase; the app is hosted on GitHub Pages.
 - `config.js`: Supabase URL + publishable key (empty = demo mode). Never put secret keys here.
 - `book.html`, `book.js`: public page where people request a meeting
 - `sw.js`, `manifest.webmanifest`, `icons/`, `bg/`: make it installable
-- `lib/`: FullCalendar 6.1.15 and supabase-js 2.119.0 (both MIT licence)
+- `lib/`: supabase-js 2.119.0 (MIT licence)
 - `supabase/schema.sql`: database tables and privacy rules
 - `supabase/functions/owner`, `supabase/functions/booking`: server functions (scheduler, calendar, booking)
 - `supabase/cron.sql`: hourly and nightly re-planning
