@@ -1272,7 +1272,7 @@ const Demo = (() => {
     db.blocks = keepPinned.slice(); const next = {}, atRisk = [], now = Date.now();
     const pr = { High: 0, Medium: 1, Low: 2 };
     db.tasks.filter(t => t['Auto schedule'] === 'YES' && t.Status !== 'Completed' && Number(t['Est hours']) > 0)
-      .sort((a, b) => (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3) || String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')))
+      .sort((a, b) => String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')) || (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3))
       .forEach(t => {
         const cat = db.settings.categories.find(c => c.name === (t['Time category'] || db.settings.goalMap[t['Main goal']] || 'Working')) || db.settings.categories[0];
         let need = Number(t['Est hours']) * 3600000 - keepPinned.filter(b => b.taskId === t.ID).reduce((a, b) => a + b.e - b.s, 0);

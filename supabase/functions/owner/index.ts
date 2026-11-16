@@ -246,7 +246,8 @@ function plan(input) {
   pool.forEach(ev => remove.push(ev.id));
   input.tasks.forEach(t => {                                   // 5. at risk
     const lastEnd = Math.max(0, ...blocks[t.id].map(b => b[1]));
-    if (t.dueEnd && (unplaced[t.id] || lastEnd > t.dueEnd)) atRisk.push(t.id);
+    // at risk = a block ends after the due date, or time is missing although the due date is inside the planning window
+    if (t.dueEnd && (lastEnd > t.dueEnd || (unplaced[t.id] && (!input.horizon || t.dueEnd <= input.horizon)))) atRisk.push(t.id);
   });
   return { update: updates, create, remove, atRisk, unplaced, blocks };
 }
@@ -265,7 +266,8 @@ async function withLock(owner, fn) {
 }
 function rank(t) {
   const pr = { High: 0, Medium: 1, Low: 2 }[t.priority];
-  return [t.start_now === 'do now' ? 0 : 1, pr === undefined ? 3 : pr, t.due_date ? Date.parse(t.due_date) : 9e15];
+  // order: Do now first, then earliest due date (no due date last), then priority
+  return [t.start_now === 'do now' ? 0 : 1, t.due_date ? Date.parse(t.due_date) : 9e15, pr === undefined ? 3 : pr];
 }
 const cmp = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
 const prop = (e, k) => ((e.extendedProperties || {}).private || {})[k];
@@ -298,13 +300,39 @@ async function schedule(owner, mode = 'incremental') {
     ]);
     const busy = mainEv.filter(isBusy).map(e => [evStart(e), evEnd(e)]);
     const all = myEv.filter(e => prop(e, 'mysteps_task') && e.start.dateTime).map(e => ({
-      id: e.id, taskId: prop(e, 'mysteps_task'), pinned: prop(e, 'mysteps_pin') === '1', now: prop(e, 'mysteps_now') === '1', start: evStart(e), end: evEnd(e) }));
+      id: e.id, taskId: prop(e, 'mysteps_task'), pinned: prop(e, 'mysteps_pin') === '1', now: prop(e, 'mysteps_now') === '1',
+      done: prop(e, 'mysteps_done') === '1', summary: e.summary || '', start: evStart(e), end: evEnd(e) }));
     const open = {}; tasks.forEach(t => { open[t.id] = t; });
 
-    for (const b of all) {                                     // done / switched off tasks
-      if (open[b.taskId]) continue;
-      if (b.start < now && b.end > now) { await g(owner, `calendars/${enc(cal)}/events/${b.id}`, { method: 'PATCH', body: { end: { dateTime: new Date(now).toISOString() } } }); writes++; }
-      else if (b.start >= now) { await g(owner, `calendars/${enc(cal)}/events/${b.id}`, { method: 'DELETE' }); writes++; b.gone = true; }
+    // Blocks of tasks that are no longer open. Completed tasks keep their history in the calendar:
+    // past blocks stay (marked ✓), an ongoing block ends now, only future blocks are removed.
+    // If a task was finished before any of its blocks started, one block is kept, ending when it was completed.
+    const closedIds = [...new Set(all.filter(b => !open[b.taskId]).map(b => b.taskId))];
+    const finished = {};
+    if (closedIds.length) (await db(`tasks?owner_id=eq.${owner}&status=eq.Completed&id=in.(${closedIds.map(enc).join(',')})&select=id,completed_on`))
+      .forEach(t => { finished[t.id] = t.completed_on ? Math.min(Date.parse(t.completed_on), nowExact) : nowExact; });
+    const evUrl = id => `calendars/${enc(cal)}/events/${id}`;
+    const doneBody = b => ({ summary: b.summary.startsWith('✓ ') ? b.summary : '✓ ' + b.summary,
+      extendedProperties: { private: { mysteps_task: String(b.taskId), mysteps_done: '1', mysteps_pin: '1', mysteps_now: '0' } } });
+    for (const id of closedIds) {
+      const blocks = all.filter(b => b.taskId === id).sort((a, b) => a.start - b.start);
+      const doneAt = finished[id];
+      if (doneAt !== undefined && !blocks.some(b => b.start < now)) {          // finished early: keep one block as a record
+        const b = blocks[0], end = Math.floor(doneAt / (5 * MIN)) * 5 * MIN, start = end - (b.end - b.start);
+        await g(owner, evUrl(b.id), { method: 'PATCH', body: { ...doneBody(b), start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(end).toISOString() } } }); writes++;
+        b.start = start; b.end = end; b.done = true;
+      }
+      for (const b of blocks) {
+        if (b.done && b.end <= now) continue;
+        if (b.start < now && b.end > now) {                                    // ongoing: stop it now
+          await g(owner, evUrl(b.id), { method: 'PATCH', body: { ...(doneAt !== undefined ? doneBody(b) : {}), end: { dateTime: new Date(now).toISOString() } } }); writes++;
+          b.end = now; if (doneAt !== undefined) b.done = true;
+        } else if (b.start >= now) {                                           // future: free the time
+          await g(owner, evUrl(b.id), { method: 'DELETE' }); writes++; b.gone = true;
+        } else if (doneAt !== undefined && !b.done) {                          // past: mark as done (once)
+          await g(owner, evUrl(b.id), { method: 'PATCH', body: doneBody(b) }); writes++; b.done = true;
+        }
+      }
     }
     for (const t of tasks.filter(x => x.start_now === 'do now')) {   // Do now
       if (!all.some(b => b.taskId === t.id && b.start <= nowExact && b.end > nowExact)) {
@@ -321,11 +349,15 @@ async function schedule(owner, mode = 'incremental') {
     const items = tasks.map(t => {
       const used = live.filter(b => b.taskId === t.id && (b.start < now || b.pinned)).reduce((a, b) => a + b.end - b.start, 0);
       const due = t.due_date ? (p => localToUtc(tz, p[0], p[1], p[2], 23, 59))(t.due_date.split('-').map(Number)) : null;
-      return { id: t.id, t, rank: rank(t), remaining: Math.max(0, Number(t.est_hours) * HOUR - used), dueEnd: due,
+      // Planned time passed but the task is not ticked done: plan its estimated time again.
+      // (Time is counted per round of the estimate, so a round that is half done keeps only its rest.)
+      const est = Math.round(Number(t.est_hours) * 60) * MIN, inRound = est > 0 ? Math.round(used / MIN) * MIN % est : 0;
+      const replanned = used > 0 && inRound === 0;
+      return { id: t.id, t, rank: rank(t), remaining: est - inRound, replanned, dueEnd: due,
         windows: windowsOf(catFor(s, t), now, horizonEnd, tz), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN };
     }).sort((a, b) => cmp(a.rank, b.rank));
     const existing = live.filter(b => !b.pinned && b.start >= now).map(b => ({ id: b.id, taskId: b.taskId, start: b.start, end: b.end }));
-    const p = plan({ now, step: STEP, tasks: items, busy, existing, mode, pullLimit: 3 });
+    const p = plan({ now, step: STEP, tasks: items, busy, existing, mode, pullLimit: 3, horizon: horizonEnd });
 
     const byId = {}; items.forEach(x => { byId[x.id] = x.t; });
     for (const u of p.update) { await g(owner, `calendars/${enc(cal)}/events/${u.id}`, { method: 'PATCH', body: { start: { dateTime: new Date(u.start).toISOString() }, end: { dateTime: new Date(u.end).toISOString() } } }); writes++; }
@@ -338,7 +370,7 @@ async function schedule(owner, mode = 'incremental') {
     const status = { lastRun: new Date().toISOString(), mode, writes, atRisk: p.atRisk,
       unplaced: Object.fromEntries(Object.entries(p.unplaced).map(([k, v]) => [k, Math.round(v / MIN)])), next,
       doingNow: live.filter(b => b.now && b.start <= nowExact && b.end > nowExact).map(b => b.taskId),
-      overTime: items.filter(x => x.remaining === 0).map(x => x.id) };
+      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id) };
     await db(`settings?owner_id=eq.${owner}`, { method: 'PATCH', body: { status }, prefer: 'return=minimal' });
     return status;
   });
