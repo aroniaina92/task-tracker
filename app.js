@@ -286,7 +286,12 @@ function todayBuckets() {
   const td = today(), T = S.data.tasks;
   const open = T.filter(t => !isDone(t));
   // "Do now" tasks always belong to today, shown first
-  const planned = open.filter(t => isDoNow(t) || isTrue(t.Today) || d10(t['Due date']) === td || d10(t['Scheduled date']) === td);
+  // With automatic scheduling, a scheduled task belongs to today only if it has time planned today
+  // (a task due today but planned for tomorrow is not counted). Otherwise: due or scheduled date today.
+  const plan = isAdmin() && SCH() && SCH().ready, st = SST();
+  const plannedToday = t => (st.todayDate === td && (st.todayTasks || []).includes(String(t.ID))) || (nextBlock(t) && localDay(nextBlock(t)) === td);
+  const planned = open.filter(t => isDoNow(t) || isTrue(t.Today) ||
+    (plan && isScheduled(t) ? plannedToday(t) : (d10(t['Due date']) === td || d10(t['Scheduled date']) === td)));
   const ids = new Set(planned.map(t => t.ID));
   const overdue = sortTasks(open.filter(t => !ids.has(t.ID) && d10(t['Due date']) && d10(t['Due date']) < td));
   const progress = open.filter(t => !ids.has(t.ID) && !overdue.includes(t) && t.Status === 'In Progress');
@@ -1417,7 +1422,9 @@ const Demo = (() => {
     const endToday = new Date(); endToday.setHours(24, 0, 0, 0); const notToday = {};
     db.tasks.filter(t => t.Today && t['Auto schedule'] === 'YES' && t.Status !== 'Completed').forEach(t => {
       const later = db.blocks.filter(b => b.taskId === t.ID && b.s >= endToday.getTime()).reduce((a, b) => a + b.e - b.s, 0); if (later) notToday[t.ID] = Math.round(later / 60000); });
-    db.status = { lastRun: new Date().toISOString(), next, atRisk, notToday, doingNow: db.blocks.filter(b => b.pinned && b.s <= now && b.e > now).map(b => b.taskId), overTime: [] };
+    const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
+    const todayTasks = [...new Set(db.blocks.filter(b => b.s < endToday.getTime() && b.e > startToday.getTime()).map(b => String(b.taskId)))];
+    db.status = { lastRun: new Date().toISOString(), next, atRisk, notToday, todayTasks, todayDate: td, doingNow: db.blocks.filter(b => b.pinned && b.s <= now && b.e > now).map(b => b.taskId), overTime: [] };
   }
   db.tasks.forEach(t => { if (t.Reclaim === 'YES') t['Auto schedule'] = 'YES'; });
   demoPlan();

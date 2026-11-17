@@ -452,6 +452,12 @@ async function schedule(owner, mode = 'incremental') {
       unplaced: Object.fromEntries(Object.entries(p.unplaced).map(([k, v]) => [k, Math.round(v / MIN)])), next,
       doingNow: live.filter(b => b.now && b.start <= nowExact && b.end > nowExact).map(b => b.taskId),
       overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id), habitsSkipped: H.skipped,
+      // tasks with time planned today (earlier today included), for the Home page
+      todayDate: new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(today + 12 * HOUR)),
+      todayTasks: (() => { const tEnd = addLocalDays(tz, today, 1), ids = new Set();
+        live.filter(b => b.start < now && b.end > today).forEach(b => ids.add(String(b.taskId)));
+        Object.entries(p.blocks).forEach(([id, bs]) => { if (bs.some(b => b[0] < tEnd && b[1] > today)) ids.add(String(id)); });
+        return [...ids]; })(),
       // "Do today" tasks that did not fit today: minutes planned after today (or not planned at all)
       notToday: Object.fromEntries(items.filter(x => x.t.today).map(x => {
         const tEnd = addLocalDays(tz, today, 1);
