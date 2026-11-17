@@ -252,6 +252,46 @@ function plan(input) {
   return { update: updates, create, remove, atRisk, unplaced, blocks };
 }
 
+/* ================= HABITS: reserved time, as close as possible to the ideal time =================
+   occs: [{key, habitId, name, day, ideal, winStart, winEnd, dur}] · busy: [[s,e]] · existing: {key: {id, start, end}}
+   Returns {placed: [{...occ, start, end, existingId}], skipped: [keys]} */
+function placeHabits(occs, busy, existing, now, mode) {
+  const occ = busy.map(b => [b[0], b[1]]), free = (s, e) => !occ.some(o => o[0] < e && s < o[1]);
+  const placed = [], skipped = [];
+  occs.slice().sort((a, b) => a.ideal - b.ideal).forEach(h => {
+    const ex = existing[h.key];
+    if (ex && mode !== 'full' && ex.start >= h.winStart && ex.end <= h.winEnd && ex.end - ex.start === h.dur && (ex.start >= now || ex.end > now) && free(ex.start, ex.end)) {
+      occ.push([ex.start, ex.end]); placed.push({ ...h, start: ex.start, end: ex.end, existingId: ex.id }); return;
+    }
+    let best = null;
+    for (let k = 0; k <= 96 && best === null; k++) {                      // ideal, then 15, 30, 45 … minutes earlier/later
+      for (const st of k ? [h.ideal - k * STEP, h.ideal + k * STEP] : [h.ideal]) {
+        if (st < h.winStart || st + h.dur > h.winEnd || st < now) continue;
+        if (free(st, st + h.dur)) { best = st; break; }
+      }
+      if (h.ideal - k * STEP < h.winStart && h.ideal + k * STEP + h.dur > h.winEnd) break;
+    }
+    if (best === null) { skipped.push(h.key); return; }
+    occ.push([best, best + h.dur]); placed.push({ ...h, start: best, end: best + h.dur, existingId: ex ? ex.id : null });
+  });
+  return { placed, skipped };
+}
+function habitOccurrences(habits, tz, today, horizonEnd, now) {
+  const out = [];
+  for (let d = today; d < horizonEnd; d = addLocalDays(tz, d, 1)) {
+    const p = parts(tz, d + 12 * HOUR), dow = new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay();
+    const dayKey = `${p.y}-${String(p.m).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+    habits.forEach(h => {
+      if (!(h.days || []).map(Number).includes(dow)) return;
+      const [hh, mm] = String(h.ideal).split(':').map(Number), ideal = localToUtc(tz, p.y, p.m, p.d, hh, mm), dur = h.minutes * MIN;
+      const winStart = Math.max(d, ideal - h.flex * MIN), winEnd = Math.min(addLocalDays(tz, d, 1), ideal + h.flex * MIN + dur);
+      if (winEnd - dur < now) return;                                      // window already over
+      out.push({ key: h.id + '|' + dayKey, habitId: h.id, name: h.name, day: d, ideal, winStart, winEnd, dur });
+    });
+  }
+  return out;
+}
+
 /* ================= scheduling run ================= */
 async function withLock(owner, fn) {
   for (let i = 0; i < 6; i++) {
@@ -293,10 +333,11 @@ async function schedule(owner, mode = 'incremental') {
     const today = dayStartUtc(tz, nowExact), horizonEnd = addLocalDays(tz, today, s.horizonDays + 1);
     let writes = 0;
 
-    const [mainEv, myEv, tasks] = await Promise.all([
+    const [mainEv, myEv, tasks, habits] = await Promise.all([
       listEvents(owner, 'primary', now - HOUR, horizonEnd),
       listEvents(owner, cal, today - 45 * DAY, horizonEnd),
-      db(`tasks?owner_id=eq.${owner}&status=neq.Completed&auto_schedule=is.true&est_hours=gt.0&select=*`)
+      db(`tasks?owner_id=eq.${owner}&status=neq.Completed&auto_schedule=is.true&est_hours=gt.0&select=*`),
+      db(`habits?owner_id=eq.${owner}&active=is.true&select=*`).catch(() => [])     // table missing = no habits yet
     ]);
     const busy = mainEv.filter(isBusy).map(e => [evStart(e), evEnd(e)]);
     const all = myEv.filter(e => prop(e, 'mysteps_task') && e.start.dateTime).map(e => ({
@@ -357,12 +398,44 @@ async function schedule(owner, mode = 'incremental') {
         windows: windowsOf(catFor(s, t), now, horizonEnd, tz), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN };
     }).sort((a, b) => cmp(a.rank, b.rank));
     const existing = live.filter(b => !b.pinned && b.start >= now).map(b => ({ id: b.id, taskId: b.taskId, start: b.start, end: b.end }));
-    const p = plan({ now, step: STEP, tasks: items, busy, existing, mode, pullLimit: 3, horizon: horizonEnd });
+
+    // habits first: they reserve time near their ideal time, tasks are planned around them
+    const habitEv = myEv.filter(e => prop(e, 'mysteps_habit') && e.start.dateTime)
+      .map(e => ({ id: e.id, key: prop(e, 'mysteps_habit') + '|' + prop(e, 'mysteps_day'), start: evStart(e), end: evEnd(e) }));
+    const exHabit = {}; habitEv.forEach(e => { if (!exHabit[e.key]) exHabit[e.key] = e; });
+    const occs = habitOccurrences(habits, tz, today, horizonEnd, now);
+    let H = placeHabits(occs, busy, exHabit, now, mode);
+    let p = plan({ now, step: STEP, tasks: items, busy: busy.concat(H.placed.map(h => [h.start, h.end])), existing, mode, pullLimit: 3, horizon: horizonEnd });
+    // if a task due today or tomorrow would miss its due date, habits up to that day give way
+    const urgentEnd = addLocalDays(tz, today, 2);
+    const urgent = items.filter(x => x.dueEnd && x.dueEnd < urgentEnd && p.atRisk.includes(x.id));
+    if (urgent.length && H.placed.length) {
+      const until = Math.max(...urgent.map(x => x.dueEnd));
+      const locked = H.placed.filter(h => h.day > until), released = occs.filter(o => o.day <= until);
+      p = plan({ now, step: STEP, tasks: items, busy: busy.concat(locked.map(h => [h.start, h.end])), existing, mode, pullLimit: 0, horizon: horizonEnd });
+      const taskBlocks = []; Object.values(p.blocks).forEach(bs => bs.forEach(b => taskBlocks.push([b[0], b[1]])));
+      const H2 = placeHabits(released, busy.concat(locked.map(h => [h.start, h.end]), taskBlocks), exHabit, now, 'full');
+      H = { placed: locked.concat(H2.placed), skipped: H.skipped.filter(k => !released.some(o => o.key === k)).concat(H2.skipped) };
+    }
 
     const byId = {}; items.forEach(x => { byId[x.id] = x.t; });
     for (const u of p.update) { await g(owner, `calendars/${enc(cal)}/events/${u.id}`, { method: 'PATCH', body: { start: { dateTime: new Date(u.start).toISOString() }, end: { dateTime: new Date(u.end).toISOString() } } }); writes++; }
     for (const c of p.create) { await g(owner, `calendars/${enc(cal)}/events`, { method: 'POST', body: evBody(s, byId[c.taskId], c.start, c.end) }); writes++; }
     for (const id of p.remove) { await g(owner, `calendars/${enc(cal)}/events/${id}`, { method: 'DELETE' }); writes++; }
+    // habit events: create / move / remove (past ones stay as history)
+    const keepHabit = new Set();
+    for (const h of H.placed) {
+      const ex = h.existingId ? habitEv.find(e => e.id === h.existingId) : null;
+      if (ex) { keepHabit.add(ex.id); if (ex.start !== h.start || ex.end !== h.end) { await g(owner, evUrl(ex.id), { method: 'PATCH', body: { start: { dateTime: new Date(h.start).toISOString() }, end: { dateTime: new Date(h.end).toISOString() } } }); writes++; } }
+      else {
+        const e = await g(owner, `calendars/${enc(cal)}/events`, { method: 'POST', body: { summary: h.name, colorId: '2', transparency: 'transparent',
+          description: 'My Steps habit · reserved time (shown as free, so people can still book it)', reminders: { useDefault: false, overrides: [] },
+          start: { dateTime: new Date(h.start).toISOString() }, end: { dateTime: new Date(h.end).toISOString() },
+          extendedProperties: { private: { mysteps_habit: String(h.habitId), mysteps_day: h.key.split('|')[1] } } } });
+        keepHabit.add(e.id); writes++;
+      }
+    }
+    for (const e of habitEv) if (!keepHabit.has(e.id) && e.start >= now) { await g(owner, evUrl(e.id), { method: 'DELETE' }); writes++; }
 
     const next = {};
     Object.keys(p.blocks).forEach(id => { const f = p.blocks[id].map(b => b[0]).filter(x => x >= now).sort((a, b) => a - b)[0]; if (f) next[id] = new Date(f).toISOString(); });
@@ -370,7 +443,7 @@ async function schedule(owner, mode = 'incremental') {
     const status = { lastRun: new Date().toISOString(), mode, writes, atRisk: p.atRisk,
       unplaced: Object.fromEntries(Object.entries(p.unplaced).map(([k, v]) => [k, Math.round(v / MIN)])), next,
       doingNow: live.filter(b => b.now && b.start <= nowExact && b.end > nowExact).map(b => b.taskId),
-      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id) };
+      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id), habitsSkipped: H.skipped };
     await db(`settings?owner_id=eq.${owner}`, { method: 'PATCH', body: { status }, prefer: 'return=minimal' });
     return status;
   });
@@ -390,6 +463,7 @@ async function calendarData(owner, fromIso, toIso) {
       .map(e => ({ title: e.summary || '(busy)', start: e.start.dateTime || e.start.date, end: e.end.dateTime || e.end.date, allDay: !e.start.dateTime })),
     blocks: myEv.filter(e => prop(e, 'mysteps_task') && e.start.dateTime).map(e => ({ id: e.id, taskId: prop(e, 'mysteps_task'), title: e.summary,
       pinned: prop(e, 'mysteps_pin') === '1', start: e.start.dateTime, end: e.end.dateTime })),
+    habits: myEv.filter(e => prop(e, 'mysteps_habit') && e.start.dateTime).map(e => ({ id: e.id, habitId: prop(e, 'mysteps_habit'), title: e.summary, start: e.start.dateTime, end: e.end.dateTime })),
     windows, bookings: bks.map(bookingOut)
   };
 }

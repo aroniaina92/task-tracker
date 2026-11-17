@@ -114,3 +114,12 @@ In the app: **Me → Google Calendar → connect** (or the button on the Calenda
 - **"Google refused access"** in the app: Me → Google Calendar → reconnect. If it happens every week, the consent screen is still in *Testing* (step 3.4).
 - **Edit data by hand**: Supabase → **Table Editor** (like a spreadsheet).
 - Keep the old Apps Script deployment for a week as a fallback, then you can archive it. Keep the sheet (backup tabs).
+
+---
+
+## Updates
+
+### 17 Nov 2026 – offline mode, repeating tasks, habits, protected blocks
+1. **Database:** SQL Editor → New snippet → paste all of `supabase/update-2026-11-17.sql` → Run (safe to run again).
+2. **Server functions:** replace the code of **owner** and **booking** (Edge Functions → function → Code → Deploy). Keep "Verify JWT" off.
+3. **App:** unzip (the zip has no `config.js`, so yours is kept), commit, push. On the phone, close and reopen the app twice.

@@ -463,3 +463,19 @@ details.advanced[open] summary{margin-bottom:10px}
 .mg-more{font-size:10px;font-weight:700;color:var(--muted);padding-left:3px}
 @media (min-width:700px){ .mg-d{min-height:104px;padding:5px} .mg-t{font-size:12px} }
 .sec-h .link{background:none;border:0;font:inherit;font-weight:600;cursor:pointer}
+
+/* offline / waiting-to-sync banner */
+.offbar{position:sticky;top:0;z-index:30;margin:0 auto;max-width:760px;padding:8px 14px;font-size:13px;font-weight:600;color:#fff;background:rgba(10,40,60,.86);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-radius:0 0 14px 14px;text-align:center}
+.offbar .link{background:none;border:0;color:#9ff5e8;font:inherit;text-decoration:underline;cursor:pointer;margin-left:6px}
+
+/* habits + repeat */
+.ckrow.habit{border-left-color:#5fae7d;cursor:pointer}
+.ckrow.habit .ck-name{font-weight:600}
+.ckrow.habit .ck-name small{display:block;font-weight:500;color:var(--muted);font-size:12px;margin-top:2px}
+.ckrow.habit.off{opacity:.55}
+.hb-ico{flex:none;width:28px;text-align:center;font-size:18px}
+.daypick{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.daypick button{flex:1 0 40px;border:1px solid var(--line);background:transparent;border-radius:10px;padding:8px 0;font:inherit;font-weight:600;color:var(--muted)}
+.daypick button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.daypick.quick button{flex:0 0 auto;padding:4px 10px;font-size:12px;border-radius:99px}
+.hint{display:block;color:var(--muted);font-size:12px;margin-top:4px;font-weight:400}

@@ -20,6 +20,9 @@ const S = {
 const REQUIRED = ['Main goal', 'Category', 'Objective', 'Due date', 'Est hours', 'Priority', 'Energy'];
 const DEFAULT_STATUSES = ['Not Started', 'In Progress', 'Waiting', 'Completed'];
 const PRIO = { High: 0, Medium: 1, Low: 2, '': 3 };
+const REPEATS = [['', 'Does not repeat'], ['daily', 'Every day'], ['weekdays', 'Every weekday (Mon–Fri)'], ['weekly', 'Every week'],
+  ['biweekly', 'Every 2 weeks'], ['monthly', 'Every month'], ['yearly', 'Every year']];
+const repeatLabel = r => ({ daily: 'daily', weekdays: 'weekdays', weekly: 'weekly', biweekly: 'every 2 weeks', monthly: 'monthly', yearly: 'yearly' })[r] || '';
 
 const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
@@ -30,13 +33,21 @@ const store = {
 async function api(action, payload = {}) {
   if (DEMO) return Demo.call(action, payload);
   if (SUPA) {
-    try { return await SUPA.call(action, payload); }
-    catch (e) { if (e.auth) { logout(true); throw new Error('Session expired, please log in again'); } throw e; }
+    try { const r = await SUPA.call(action, payload); setOffline(false); return r; }
+    catch (e) {
+      if (e.auth) { logout(true); throw new Error('Session expired, please log in again'); }
+      if (isOffline(e)) { setOffline(true); throw Object.assign(new Error('You are offline'), { offline: true }); }
+      throw e;
+    }
   }
-  const res = await fetch(CFG.API_URL, {
-    method: 'POST',
-    body: JSON.stringify(Object.assign({ action, token: S.token }, payload)) // text/plain: no CORS preflight
-  });
+  let res;
+  try {
+    res = await fetch(CFG.API_URL, {
+      method: 'POST',
+      body: JSON.stringify(Object.assign({ action, token: S.token }, payload)) // text/plain: no CORS preflight
+    });
+  } catch (e) { setOffline(true); throw Object.assign(new Error('You are offline'), { offline: true }); }
+  setOffline(false);
   const j = await res.json();
   if (!j.ok) {
     if (j.error === 'AUTH') { logout(true); throw new Error('Session expired, please log in again'); }
@@ -44,6 +55,58 @@ async function api(action, payload = {}) {
   }
   return j;
 }
+
+/* =====================================================================
+   Offline: changes are kept on the phone and sent when the connection is back
+   ===================================================================== */
+const isOffline = e => !!(e && e.offline) || !navigator.onLine || /Failed to fetch|NetworkError|Load failed|offline|timed? ?out|aborted/i.test(String(e && e.message));
+function setOffline(v) { if (S.offline !== v) { S.offline = v; if (S.data) paintOffbar(); } }
+const qKey = () => 'tt_queue_' + (S.user ? S.user.email : '');
+const queue = () => store.get(qKey()) || [];
+const setQueue = q => store.set(qKey(), q);
+const newId = () => Math.random().toString(16).slice(2, 10).padEnd(8, '0');
+function persistLocal() { if (S.user && S.data) store.set('tt_cache_' + S.user.email, S.data); }
+function offbarHTML() {
+  const n = queue().length;
+  if (!S.offline && !n) return '';
+  const what = n ? ` · ${n} change${n > 1 ? 's' : ''} waiting` : '';
+  return S.offline ? `<div class="offbar">📴 Offline · showing your saved data${what}</div>`
+    : `<div class="offbar">⏳ ${n} change${n > 1 ? 's' : ''} waiting to sync <button class="link" data-act="sync-now">Sync now</button></div>`;
+}
+function paintOffbar() { const el = $('#offbar'); if (el) el.innerHTML = offbarHTML(); }
+// Run a change: show it at once (local), then send it; offline → keep it in the queue.
+async function write(action, payload, local, msg) {
+  if (local) { local(); persistLocal(); render(); }
+  if (queue().length || !navigator.onLine) { setQueue(queue().concat([{ action, payload }])); setOffline(!navigator.onLine || S.offline); paintOffbar(); if (msg) toast(msg + ' · will sync when online'); flushQueue(); return null; }
+  syncing(true, 'Saving…');
+  try { const r = await api(action, payload); if (r && r.data) setData(r.data); render(); if (msg) toast(msg); return r; }
+  catch (e) {
+    if (isOffline(e)) { setQueue(queue().concat([{ action, payload }])); paintOffbar(); toast((msg || 'Saved') + ' on this phone · will sync when online'); return null; }
+    toast('Not saved: ' + e.message); refresh(false); return null;
+  } finally { syncing(false); }
+}
+let flushing = null;
+function flushQueue() {
+  if (flushing || !S.user || !queue().length) return flushing || Promise.resolve();
+  flushing = (async () => {
+    let sent = 0, last = null;
+    while (queue().length) {
+      const op = queue()[0];
+      try { const r = await api(op.action, op.payload); if (r && r.data) last = r.data; sent++; }
+      catch (e) { if (isOffline(e)) break; toast('A change could not be saved: ' + e.message); }
+      setQueue(queue().slice(1));
+    }
+    if (sent && !queue().length) {
+      if (last) setData(last); render(); toast(`Synced ${sent} change${sent > 1 ? 's' : ''}`);
+      if (isAdmin()) runSchedule(false);
+    }
+    paintOffbar();
+  })().finally(() => { flushing = null; });
+  return flushing;
+}
+window.addEventListener('online', () => { setOffline(false); flushQueue().then(() => refresh(false)); });
+window.addEventListener('offline', () => setOffline(true));
+setInterval(() => { if (S.user && queue().length && navigator.onLine) flushQueue(); }, 60000);
 
 /* =====================================================================
    Helpers
@@ -179,6 +242,7 @@ function card(t, opts = {}) {
     else if (due && dayDiff(due, td) <= 2) m.push(`<span class="soon">Due ${niceDate(due)}</span>`);
     else if (due) m.push(`<span>Due ${niceDate(due)}</span>`);
     if (hrs(t)) m.push(`<span>${hrs(t)} h</span>`); else m.push('<span class="nohrs">no hours</span>');
+    if (t.Repeat) m.push(`<span>🔁 ${repeatLabel(t.Repeat)}</span>`);
     if (t.Energy) { const e = Math.min(5, Number(t.Energy) || 0); m.push(`<span class="energy" title="Energy ${e}/5">${'<b>●</b>'.repeat(e)}${'<i>●</i>'.repeat(5 - e)}</span>`); }
     if (isAdmin() && isScheduled(t)) {
       if (isOverTime(t)) m.push('<span class="wait">⏱ planned time used, add hours or tick ✓</span>');
@@ -432,11 +496,7 @@ function openIdea(x) {
     <button type="button" class="btn primary block" data-act="idea-task" data-iid="${esc(x.ID)}" style="margin:8px 0 10px">→ Make it a task</button>
     <button type="button" class="btn danger block" data-act="idea-del">Delete idea</button></form>`, saveIdeaSheet);
 }
-async function apiIdea(action, payload, msg) {
-  syncing(true, 'Saving…');
-  try { const r = await api(action, payload); setData(r.data); render(); if (msg) toast(msg); }
-  catch (e) { toast('Not saved: ' + e.message); refresh(false); } finally { syncing(false); }
-}
+async function apiIdea(action, payload, msg) { persistLocal(); return write(action, payload, null, msg); }
 function saveIdeaSheet() {
   const f = $('#idf'), text = f.Text.value.trim(); if (!text) return toast('The idea is empty');
   const idea = { ID: S.ideaForm.ID, Text: text, Color: S.ideaForm.color, Goal: f.Goal.value, Pinned: f.Pinned.checked };
@@ -518,6 +578,7 @@ async function doReset(kind, btn) {
     payload = ['resetMany', { kind: R.kind, names, itself: R.itself }];
   }
   btn.disabled = true; syncing(true, 'Resetting…');
+  if (queue().length || !navigator.onLine) { toast('Resetting needs internet. Try again when you are online.'); return; }
   try { const r = await api(payload[0], payload[1]); setData(r.data); closeSheet(); render(); toast(r.text || 'Done'); }
   catch (e) { toast('Not reset: ' + e.message); btn.disabled = false; } finally { syncing(false); }
 }
@@ -580,6 +641,8 @@ function viewCalendar() {
       ${list.length > 3 ? `<span class="mg-more">+${list.length - 3}</span>` : ''}</button>`;
   }).join('');
   const dayList = (map[sel] || []).map(taskOf), open = dayList.filter(t => !isDone(t)), doneL = dayList.filter(isDone);
+  const dayHabits = cal ? (cal.habits || []).filter(h => localDay(h.start) === sel).sort((a, b) => a.start.localeCompare(b.start)) : [];
+  const habitRows = dayHabits.map(h => `<div class="ckrow habit"><span class="hb-ico">🌱</span><div class="ck-name">${esc(h.title)}<small> · reserved ${esc(new Date(h.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div></div>`).join('');
   const rows = open.concat(doneL).map(t => `<div class="ckrow ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
       <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
       <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}</div></div>`).join('');
@@ -592,10 +655,56 @@ function viewCalendar() {
       ${cal && cal.error ? `<div class="empty">Could not load your plan: ${esc(cal.error)} <button class="btn small" data-act="cal-reload">Try again</button></div>` : ''}
       <div class="mg ${cal ? '' : 'loading'}">${head}${cells}</div></div>
     <div class="sec-h"><h2>${esc(dayTitle(sel))} <span class="n">${open.length}</span></h2><button class="link" data-act="sync">↻ Re-plan</button></div>
-    ${!cal ? '<div class="skel"></div>' : rows ? `<div class="card cklist">${rows}</div>` : '<div class="empty">Nothing planned this day.</div>'}
+    ${!cal ? '<div class="skel"></div>' : rows || habitRows ? `<div class="card cklist">${rows}${habitRows}</div>` : '<div class="empty">Nothing planned this day.</div>'}
     <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) + ' · ' : ''}Times and reminders are in Google Calendar.</p>
+    ${habitsHTML()}
     <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
       <button class="btn small" data-act="copy-link">Copy link</button></div>`;
+}
+/* ---------- Habits (owner): reserved time near an ideal time, shown as free to people who book ---------- */
+const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function habitDaysText(days) {
+  const d = (days || []).map(Number).sort();
+  if (d.length === 7) return 'Every day';
+  if (d.join() === '1,2,3,4,5') return 'Weekdays';
+  if (d.join() === '0,6') return 'Weekends';
+  return [1, 2, 3, 4, 5, 6, 0].filter(x => d.includes(x)).map(x => DAY_SHORT[x]).join(' ');
+}
+const flexText = f => Number(f) ? '±' + (f >= 60 ? (f / 60) + ' h' : f + ' min') : 'exact time';
+function habitsHTML() {
+  const list = S.data.habits || [];
+  return `<div class="sec-h"><h2>Habits <span class="n">${list.filter(h => h.Active).length}</span></h2><button class="link" data-act="habit-new">+ New habit</button></div>
+    ${list.length ? `<div class="card cklist">${list.map(h => `<div class="ckrow habit ${h.Active ? '' : 'off'}" data-hid="${esc(h.ID)}" data-act="habit-open">
+      <span class="hb-ico">🌱</span><div class="ck-name">${esc(h.Name)}<small>${esc(habitDaysText(h.Days))} · ${esc(h.Ideal)} ${esc(flexText(h.Flex))} · ${h.Minutes} min${h.Active ? '' : ' · paused'}</small></div></div>`).join('')}</div>`
+      : '<div class="empty">No habits yet. A habit reserves time in your calendar (e.g. 🏃 Run, 30 min, around 05:30 on weekdays). It moves a little if needed, gives way to tasks due today or tomorrow, and people can still book over it.</div>'}`;
+}
+function openHabit(h) {
+  const x = h || { ID: '', Name: '', Minutes: 30, Days: [1, 2, 3, 4, 5], Ideal: '06:00', Flex: 60, Active: true };
+  S.habitForm = { ID: x.ID, days: new Set((x.Days || []).map(Number)) };
+  const opt = (list, val, fmt) => list.map(v => `<option value="${v}" ${Number(val) === v ? 'selected' : ''}>${fmt(v)}</option>`).join('');
+  openSheet(h ? 'Edit habit' : 'New habit', `<form id="hf" onsubmit="return false">
+    <label class="field"><span class="lab">Habit</span><input name="Name" value="${esc(x.Name)}" placeholder="e.g. 🏃 Run, 📖 Reading, 🧘 Stretching"></label>
+    <div class="field"><span class="lab">Days</span><div class="daypick">${[1, 2, 3, 4, 5, 6, 0].map(d => `<button type="button" data-act="hf-day" data-v="${d}" aria-pressed="${S.habitForm.days.has(d)}">${DAY_SHORT[d]}</button>`).join('')}</div>
+      <div class="daypick quick"><button type="button" data-act="hf-days" data-v="1,2,3,4,5">Weekdays</button><button type="button" data-act="hf-days" data-v="0,1,2,3,4,5,6">Every day</button><button type="button" data-act="hf-days" data-v="0,6">Weekends</button></div></div>
+    <div class="row2"><label class="field"><span class="lab">Ideal time</span><input type="time" name="Ideal" value="${esc(x.Ideal)}" step="300"></label>
+      <label class="field"><span class="lab">How long</span><select name="Minutes">${opt([10, 15, 20, 30, 45, 60, 90, 120, 180], x.Minutes, v => v < 60 ? v + ' min' : (v / 60) + ' h')}</select></label></div>
+    <label class="field"><span class="lab">Can move</span><select name="Flex">${opt([0, 15, 30, 60, 90, 120, 180], x.Flex, flexText)}</select>
+      <small class="hint">Earlier or later than the ideal time when that time is taken.</small></label>
+    <label class="switch"><span>Active<small>Pause it without deleting it</small></span><input type="checkbox" name="Active" ${x.Active ? 'checked' : ''}></label>
+    ${h ? '<button type="button" class="btn danger block" data-act="habit-del" style="margin-top:12px">Delete habit</button>' : ''}</form>`, saveHabit);
+}
+async function saveHabit() {
+  const f = $('#hf'), name = f.Name.value.trim(), days = [...S.habitForm.days];
+  if (!name) return toast('Give the habit a name');
+  if (!days.length) return toast('Choose at least one day');
+  if (!/^\d\d:\d\d$/.test(f.Ideal.value)) return toast('Choose an ideal time');
+  const habit = { ID: S.habitForm.ID || newId(), Name: name, Minutes: Number(f.Minutes.value), Days: days, Ideal: f.Ideal.value, Flex: Number(f.Flex.value), Active: f.Active.checked };
+  closeSheet();
+  const r = await write('saveHabit', { habit }, () => {
+    S.data.habits = S.data.habits || [];
+    const i = S.data.habits.findIndex(x => x.ID === habit.ID); if (i > -1) S.data.habits[i] = habit; else S.data.habits.push(habit);
+  }, 'Habit saved');
+  if (r) runSchedule(false);
 }
 function reqsHTML() {
   const list = (S.bookings || []).filter(b => b.status === 'Pending');
@@ -776,7 +885,7 @@ const VIEWS = { home: viewHome, tasks: viewTasks, easy: viewEasy, calendar: view
 function render() {
   if (!S.data) { $('#app').innerHTML = '<div class="page">' + '<div class="skel"></div>'.repeat(4) + '</div>'; return; }
   const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : null;
-  $('#app').innerHTML = `<main class="page">${VIEWS[S.view]()}</main>`;
+  $('#app').innerHTML = `<div id="offbar">${offbarHTML()}</div><main class="page">${VIEWS[S.view]()}</main>`;
   document.querySelectorAll('#nav [data-view]').forEach(b => b.setAttribute('aria-current', b.dataset.view === S.view || (b.dataset.view === 'tasks' && S.view === 'easy')));
   const dot = document.querySelector('#nav [data-view="calendar"]'); if (dot) dot.classList.toggle('has-dot', !!(SCH() && SCH().pendingBookings));
   if (S.view === 'calendar' && isAdmin() && SCH() && SCH().ready && !S.bookingsLoaded) { S.bookingsLoaded = true; loadBookings(); }
@@ -786,9 +895,10 @@ const nameKey = x => String(x || '').normalize('NFC').replace(/[\uFE0F\s]+/g, ''
 function uniqNames(list) { const seen = new Set(); return (list || []).filter(x => { const k = nameKey(x.Name); if (!k || seen.has(k)) return false; seen.add(k); return true; }); }
 function setData(d) { if (d) { d.goals = uniqNames(d.goals); d.categories = uniqNames(d.categories); d.objectives = uniqNames(d.objectives); } S.data = d; store.set('tt_cache_' + S.user.email, d); store.set('tt_last_' + S.user.email, Date.now()); }
 async function refresh(showSpinner) {
+  if (queue().length) { await flushQueue(); if (queue().length) { paintOffbar(); return; } }
   if (showSpinner) syncing(true, 'Loading…');
-  try { const r = await api('data'); setData(r.data); render(); }
-  catch (e) { if (S.user) toast('Offline or server error: showing saved data'); }
+  try { const r = await api('data'); if (!queue().length) { setData(r.data); render(); } }
+  catch (e) { if (S.user && !isOffline(e)) toast('Server error: showing saved data'); else paintOffbar(); }
   finally { if (showSpinner) syncing(false); }
 }
 function start() {
@@ -799,22 +909,19 @@ function start() {
   else { render(); refresh(true); }
 }
 async function save(partial, msg) {
-  const t = S.data.tasks.find(x => x.ID === partial.ID);
-  if (t) { // optimistic update
+  const r = await write('save', { task: partial }, () => {
+    const t = S.data.tasks.find(x => x.ID === partial.ID);
+    if (!t) return;
     if ('Status' in partial && partial.Status !== t.Status) {
       t['Completed on'] = partial.Status === 'Completed' ? new Date().toISOString().slice(0, 19) : '';
       if (partial.Status === 'Completed') { t.Today = false; t['Start now'] = ''; }
     }
-    Object.assign(t, partial); render();
-  }
-  syncing(true, 'Saving…');
-  try {
-    const r = await api('save', { task: partial }); setData(r.data); render(); if (msg) toast(msg);
-    const after = S.data.tasks.find(x => x.ID === (partial.ID || '')) || partial;
-    const touches = ['Auto schedule', 'Start now', 'Status', 'Est hours', 'Due date', 'Priority', 'Time category', 'Main goal', 'Category'].some(k => k in partial);
-    if (isAdmin() && touches && (isScheduled(after) || 'Auto schedule' in partial)) runSchedule(false);
-  } catch (e) { toast('Not saved: ' + e.message); refresh(false); }
-  finally { syncing(false); }
+    Object.assign(t, partial);
+  }, msg);
+  if (!r) return;
+  const after = S.data.tasks.find(x => x.ID === (partial.ID || '')) || partial;
+  const touches = ['Auto schedule', 'Start now', 'Status', 'Est hours', 'Due date', 'Priority', 'Time category', 'Main goal', 'Category', 'Repeat'].some(k => k in partial);
+  if (isAdmin() && touches && (isScheduled(after) || 'Auto schedule' in partial)) runSchedule(false);
 }
 // Ask the server to (re)plan; the screen is already updated, this only brings back the new times
 let schedBusy = null;
@@ -825,7 +932,7 @@ function runSchedule(loud, mode) {
   job.p = api('schedule', { mode: mode || 'incremental' })
     .then(() => { calCache = {}; return refresh(false); })
     .then(() => { if (loud) toast('Schedule updated'); })
-    .catch(e => { if (loud) toast('Scheduling failed: ' + e.message); })
+    .catch(e => { if (loud) toast(isOffline(e) ? 'Re-planning needs internet' : 'Scheduling failed: ' + e.message); })
     .finally(() => { if (loud) syncing(false); schedBusy = null; if (job.again) runSchedule(false); });
   return job;
 }
@@ -930,7 +1037,9 @@ function openEditor(t, preset) {
     <div class="fs"><div class="lg">When</div>
       <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && isTrue(t.Today) ? 'checked' : ''}></label>
       <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${dueVal}">`)}
-      <label class="field"><span class="lab">Scheduled</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div></div>
+      <label class="field"><span class="lab">Scheduled</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div>
+      <label class="field"><span class="lab">🔁 Repeat</span><select name="Repeat">${REPEATS.map(([k, l]) => `<option value="${k}" ${(t && t.Repeat || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <small class="hint">When you tick it done, the next one is created automatically with the next due date.</small></label></div>
     <div class="fs"><div class="lg">Effort</div>
       <div class="row2">${fieldReq('Hours', 'Est hours', `<input type="number" inputmode="decimal" name="Est hours" min="0" step="0.25" value="${v('Est hours')}" placeholder="e.g. 1.5">`)}
       <label class="field"><span class="lab">Status</span>${selectHTML('Status', statuses(), t ? t.Status : openStatus(), '—').replace('<option value="">—</option>', '')}</label></div>
@@ -984,16 +1093,15 @@ async function addItem(kind) {
   const item = { Name: kind === 'objectives' ? objectiveName(f.Category.value, name) : autoEmoji(name, kind) };
   if (kind === 'categories') { if (!f['Main goal'].value) return toast('Choose or create a goal first'); item['Main goal'] = f['Main goal'].value; }
   if (kind === 'objectives') { if (!f.Category.value) return toast('Choose or create a category first'); item.Category = f.Category.value; }
-  syncing(true, 'Saving…');
-  try {
-    const r = await api('addItem', { kind, item }); setData(r.data);
+  {
+    await write('addItem', { kind, item }, () => { if (!S.data[kind].some(x => x.Name === item.Name)) S.data[kind].push(item); });
     if (kind === 'goals') { refill(f['Main goal'], S.data.goals.map(g => g.Name), item.Name); refill(f.Category, []); refill(f.Objective, []); }
     if (kind === 'categories') { refill(f.Category, catsOf(f['Main goal'].value), item.Name); refill(f.Objective, []); }
     if (kind === 'objectives') refill(f.Objective, objsOf(f.Category.value), item.Name);
     box.classList.add('hidden'); box.querySelector('input').value = '';
     f.querySelectorAll('.field.invalid').forEach(x => x.classList.remove('invalid'));
     toast({ goals: 'Goal', categories: 'Category', objectives: 'Objective' }[kind] + ' added');
-  } catch (e) { toast('Not added: ' + e.message); } finally { syncing(false); }
+  }
 }
 
 function missingFields(f, p) {
@@ -1011,8 +1119,9 @@ const LABELS = { 'Main goal': 'Goal', 'Est hours': 'Hours', 'Due date': 'Due dat
 async function saveEditor() {
   const f = $('#ed'), t = S.editing;
   const p = {};
-  ['Task', 'Main goal', 'Category', 'Objective', 'Status', 'Est hours', 'Due date', 'Scheduled date', 'Context', 'Dependencies', 'Waiting on', 'Notes']
-    .forEach(k => p[k] = f[k].value.trim());
+  ['Task', 'Main goal', 'Category', 'Objective', 'Status', 'Est hours', 'Due date', 'Scheduled date', 'Context', 'Dependencies', 'Waiting on', 'Notes', 'Repeat']
+    .forEach(k => { if (f[k]) p[k] = f[k].value.trim(); });
+  if (p.Repeat && !p['Due date']) p['Due date'] = today();
   p.Today = f.Today.checked; p.Priority = S.form.Priority || ''; p.Energy = S.form.Energy || '';
   const miss = missingFields(f, p);
   if (miss.length) {
@@ -1033,9 +1142,12 @@ async function saveEditor() {
   closeSheet();
   if (t) { p.ID = t.ID; await save(p, 'Saved'); }
   else {
-    syncing(true, 'Saving…');
-    try { const r = await api('save', { task: p }); setData(r.data); render(); toast('Task added'); if (isAdmin() && p['Auto schedule'] === 'YES') runSchedule(false); }
-    catch (e) { toast('Not saved: ' + e.message); } finally { syncing(false); }
+    p.ID = newId(); p._new = true;
+    const r = await write('save', { task: p }, () => {
+      S.data.tasks.push(Object.assign({ Status: 'Not Started', Today: false, 'Completed on': '', 'Start now': '', 'Auto schedule': '', 'Time category': '', Repeat: '',
+        Context: '', Notes: '', Dependencies: '', 'Waiting on': '', 'Scheduled date': '' }, p, { _new: undefined }));
+    }, 'Task added');
+    if (r && isAdmin() && p['Auto schedule'] === 'YES') runSchedule(false);
   }
 }
 
@@ -1137,8 +1249,8 @@ document.addEventListener('click', async e => {
     case 'set-save': saveSettings(a); break;
     case 'idea-add': {
       const box = $('#ideaNew'), text = box.value.trim(); if (!text) { box.focus(); return toast('Write your idea first'); }
-      const idea = { Text: text, Color: S.ideas.color, Goal: $('#ideaGoal').value, Pinned: false };
-      S.data.ideas = (S.data.ideas || []).concat([Object.assign({ ID: 'tmp' + Date.now(), Updated: new Date().toISOString().slice(0, 19) }, idea)]);
+      const idea = { ID: newId(), Text: text, Color: S.ideas.color, Goal: $('#ideaGoal').value, Pinned: false };
+      S.data.ideas = (S.data.ideas || []).concat([Object.assign({ Updated: new Date().toISOString().slice(0, 19), Title: text.split('\n')[0] }, idea)]);
       render(); apiIdea('saveIdea', { idea }, 'Idea added'); break;
     }
     case 'idea-color': S.ideas.color = a.dataset.v; a.parentElement.querySelectorAll('.sw').forEach(b => b.setAttribute('aria-pressed', b === a)); break;
@@ -1169,6 +1281,16 @@ document.addEventListener('click', async e => {
       if (S.view === 'tasks') render(); else go('tasks'); break;
     case 'fclear': Object.assign(S.f, { goal: '', cat: '', obj: '' }); render(); break;
     case 'refresh': refresh(true); break;
+    case 'sync-now': flushQueue(); break;
+    case 'habit-new': openHabit(null); break;
+    case 'habit-open': openHabit((S.data.habits || []).find(h => h.ID === a.dataset.hid)); break;
+    case 'hf-day': { const d = Number(a.dataset.v); S.habitForm.days.has(d) ? S.habitForm.days.delete(d) : S.habitForm.days.add(d); a.setAttribute('aria-pressed', S.habitForm.days.has(d)); break; }
+    case 'hf-days': S.habitForm.days = new Set(a.dataset.v.split(',').map(Number));
+      document.querySelectorAll('#hf [data-act="hf-day"]').forEach(b => b.setAttribute('aria-pressed', S.habitForm.days.has(Number(b.dataset.v)))); break;
+    case 'habit-del': { if (!confirm('Delete this habit? Its future reserved times are removed; past ones stay in the calendar.')) break;
+      const id = S.habitForm.ID; closeSheet();
+      const r = await write('deleteHabit', { id }, () => { S.data.habits = (S.data.habits || []).filter(h => h.ID !== id); }, 'Habit deleted');
+      if (r) runSchedule(false); break; }
     case 'sync': runSchedule(true, 'full'); break;
     case 'password': openPassword(); break;
     case 'autoemoji': store.set('tt_autoemoji', !autoEmojiOn()); render(); toast(autoEmojiOn() ? 'New goals, categories and objectives get their own emoji' : 'Automatic emoji off'); break;
@@ -1180,16 +1302,14 @@ document.addEventListener('click', async e => {
     }
     case 'delete':
       if (!confirm('Delete "' + S.editing.Task + '"? This deletes it for good.')) return;
-      { const id = S.editing.ID; closeSheet(); S.data.tasks = S.data.tasks.filter(x => x.ID !== id); render(); syncing(true, 'Deleting…');
-        try { const r = await api('delete', { id }); setData(r.data); render(); toast('Deleted'); } catch (err) { toast('Not deleted: ' + err.message); refresh(false); } finally { syncing(false); } }
+      { const id = S.editing.ID; closeSheet(); await write('delete', { id }, () => { S.data.tasks = S.data.tasks.filter(x => x.ID !== id); }, 'Deleted'); }
       break;
     case 'new-obj': {
       const f = $('#ed'), cat = f.Category.value; if (!cat) return toast('Choose a category first');
       const name = prompt('New objective in "' + cat + '":', lead(cat) + ' '); if (!name || !name.trim()) return;
-      syncing(true, 'Saving…');
-      try { const r = await api('addItem', { kind: 'objectives', item: { Name: objectiveName(cat, name), Category: cat } }); setData(r.data);
-        refill(f.Objective, S.data.objectives.filter(o => o.Category === cat).map(o => o.Name)); f.Objective.value = name.trim(); toast('Objective added'); }
-      catch (err) { toast('Not added: ' + err.message); } finally { syncing(false); }
+      const item = { Name: objectiveName(cat, name), Category: cat };
+      await write('addItem', { kind: 'objectives', item }, () => { if (!S.data.objectives.some(o => o.Name === item.Name)) S.data.objectives.push(item); }, 'Objective added');
+      refill(f.Objective, S.data.objectives.filter(o => o.Category === cat).map(o => o.Name), item.Name);
       break;
     }
   }
@@ -1296,7 +1416,8 @@ const Demo = (() => {
   demoPlan();
   const sched = () => ({ status: db.status, categories: db.settings.categories.map(c => ({ name: c.name, color: c.color })), goalMap: db.settings.goalMap,
     catMap: db.settings.catMap, defaultCategory: 'Working', pendingBookings: db.bookings.filter(b => b.status === 'Pending').length, ready: true });
-  const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, ideas: db.ideas, sched: sched(), user: S.user, today: td })) });
+  db.habits = [{ ID: 'h1', Name: '🏃 Run', Minutes: 45, Days: [1, 3, 5], Ideal: '05:30', Flex: 60, Active: true }, { ID: 'h2', Name: '📖 Reading', Minutes: 30, Days: [0, 1, 2, 3, 4, 5, 6], Ideal: '20:30', Flex: 30, Active: true }];
+  const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, ideas: db.ideas, habits: db.habits, sched: sched(), user: S.user, today: td })) });
   const wait = v => new Promise(r => setTimeout(() => r(v), 300));
   return {
     call(action, p) {
@@ -1304,15 +1425,25 @@ const Demo = (() => {
       if (action === 'data') return wait(out());
       if (action === 'save') {
         let t = db.tasks.find(x => x.ID === p.task.ID);
-        if (!t) { t = T(Math.random().toString(16).slice(2, 10), '', '', '', '', '', '', '', '', 'Not Started'); db.tasks.push(t); }
+        if (!t) { t = T(p.task.ID || Math.random().toString(16).slice(2, 10), '', '', '', '', '', '', '', '', 'Not Started'); db.tasks.push(t); }
         if ('Status' in p.task && p.task.Status !== t.Status) t['Completed on'] = p.task.Status === 'Completed' ? new Date().toISOString().slice(0, 19) : '';
-        Object.assign(t, p.task); return wait(out());
+        const wasDone = t.Status === 'Completed';
+        Object.assign(t, p.task); delete t._new;
+        if (!wasDone && t.Status === 'Completed' && t.Repeat && !t._spawned) {      // next copy of a repeating task
+          t._spawned = true; const base = new Date((t['Due date'] || td) + 'T12:00:00'), step = { daily: 1, weekly: 7, biweekly: 14 }[t.Repeat];
+          let n = new Date(base); do { if (step) n.setDate(n.getDate() + step); else if (t.Repeat === 'weekdays') { do n.setDate(n.getDate() + 1); while ([0, 6].includes(n.getDay())); }
+            else if (t.Repeat === 'monthly') n.setMonth(n.getMonth() + 1); else n.setFullYear(n.getFullYear() + 1); } while (n.toISOString().slice(0, 10) <= td);
+          db.tasks.push(Object.assign({}, t, { ID: Math.random().toString(16).slice(2, 10), Status: 'Not Started', 'Completed on': '', 'Due date': n.toISOString().slice(0, 10), _spawned: false }));
+        }
+        return wait(out());
       }
       if (action === 'delete') { db.tasks = db.tasks.filter(x => x.ID !== p.id); return wait(out()); }
       if (action === 'addItem') { db[p.kind].push(p.item); return wait(out()); }
       if (action === 'saveIdea') { let x = db.ideas.find(i => i.ID === p.idea.ID);
         if (!x) { x = { ID: 'i' + Date.now() }; db.ideas.push(x); } Object.assign(x, p.idea, { Updated: new Date().toISOString().slice(0, 19) }); return wait(out()); }
       if (action === 'deleteIdea') { db.ideas = db.ideas.filter(i => i.ID !== p.id); return wait(out()); }
+      if (action === 'saveHabit') { const i = db.habits.findIndex(h => h.ID === p.habit.ID); if (i > -1) db.habits[i] = p.habit; else db.habits.push(p.habit); return wait(out()); }
+      if (action === 'deleteHabit') { db.habits = db.habits.filter(h => h.ID !== p.id); return wait(out()); }
       if (action === 'resetMany') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind]; let n = 0;
         p.names.forEach(name => {
           n += db.tasks.filter(t => t[f] === name).length; db.tasks = db.tasks.filter(t => t[f] !== name);
@@ -1325,7 +1456,9 @@ const Demo = (() => {
       if (action === 'calendar') { const f = new Date(p.from).getTime(), t2 = new Date(p.to).getTime(), iso = x => new Date(x).toISOString();
         const windows = []; db.settings.categories.forEach(c => wins(c, 10).forEach(w => { if (w[1] > f && w[0] < t2) windows.push({ cat: c.name, color: c.color, start: iso(w[0]), end: iso(w[1]) }); }));
         return wait({ ok: true, cal: { windows, main: meetings.map(m => ({ title: m.title, start: iso(m.s), end: iso(m.e), allDay: false })),
-          blocks: db.blocks.map(b => ({ id: b.id, taskId: b.taskId, title: b.title, pinned: b.pinned, start: iso(b.s), end: iso(b.e) })), bookings: db.bookings } }); }
+          blocks: db.blocks.map(b => ({ id: b.id, taskId: b.taskId, title: b.title, pinned: b.pinned, start: iso(b.s), end: iso(b.e) })), bookings: db.bookings,
+          habits: (() => { const hs = []; for (let n = -7; n < 35; n++) { const d = new Date(); d.setDate(d.getDate() + n); db.habits.filter(h => h.Active && h.Days.includes(d.getDay())).forEach(h => {
+            const s0 = at(n, h.Ideal); if (s0 >= f && s0 < t2) hs.push({ id: h.ID + n, habitId: h.ID, title: h.Name, start: iso(s0), end: iso(s0 + h.Minutes * 60000) }); }); } return hs; })() } }); }
       if (action === 'moveBlock') { const b = db.blocks.find(x => x.id === p.id); if (b) { b.s = new Date(p.start).getTime(); b.e = new Date(p.end).getTime(); b.pinned = true; } demoPlan(); return wait({ ok: true }); }
       if (action === 'settingsGet') return wait({ ok: true, settings: JSON.parse(JSON.stringify(db.settings)), usage: { runs: 12, seconds: 95, writes: 37 } });
       if (action === 'settingsSave') { db.settings = Object.assign(db.settings, p.settings); demoPlan(); return wait({ ok: true, settings: db.settings }); }
@@ -1344,19 +1477,29 @@ const Demo = (() => {
    Boot
    ===================================================================== */
 applyTheme();
-if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname))) navigator.serviceWorker.register('sw.js').catch(() => {});
 if (SUPA) {
-  $('#app').innerHTML = '<div class="page"><div class="skel"></div><div class="skel"></div></div>';
+  // Offline-first: if this phone has your saved data, show it at once; the login is checked in the background.
+  const saved = store.get('tt_auth');
+  let started = false;
+  const returning = /[?&]code=|access_token|type=recovery/.test(location.search + location.hash);
+  if (!navigator.onLine) S.offline = true;
+  if (saved && saved.user && store.get('tt_cache_' + saved.user.email) && !returning) { S.token = saved.token; S.user = saved.user; start(); started = true; }
+  else $('#app').innerHTML = '<div class="page"><div class="skel"></div><div class="skel"></div></div>';
   SUPA.boot().then(r => {
-    if (!r.user) { store.del('tt_auth'); viewLogin(); return; }
-    S.token = 'supabase'; S.user = { email: r.user.email, name: r.user.name, role: r.user.role }; store.set('tt_auth', { token: S.token, user: S.user });
-    start();
+    if (!r.user) { store.del('tt_auth'); S.user = S.data = null; viewLogin(started ? 'Please log in again.' : ''); return; }
+    const u = { email: r.user.email, name: r.user.name, role: r.user.role };
+    const changed = !S.user || S.user.email !== u.email || S.user.role !== u.role;
+    S.token = 'supabase'; S.user = u; store.set('tt_auth', { token: S.token, user: S.user });
+    if (!started) start(); else if (changed) render();
+    setOffline(false); flushQueue();
     if (r.connected) toast('Google Calendar connected · planning your tasks');
     if (r.connectError) toast('Google Calendar: ' + r.connectError);
     if (r.recovery) setTimeout(() => openPassword(true), 300);
   }).catch(() => {
-    const auth = store.get('tt_auth');               // offline: show the saved copy
-    if (auth && auth.user) { S.token = auth.token; S.user = auth.user; start(); } else viewLogin('Could not reach the server. Check your connection.');
+    setOffline(true);
+    if (started) return;                              // already showing the saved copy
+    if (saved && saved.user) { S.token = saved.token; S.user = saved.user; start(); } else viewLogin('Could not reach the server. Check your connection.');
   });
 } else {
   const auth = store.get('tt_auth');

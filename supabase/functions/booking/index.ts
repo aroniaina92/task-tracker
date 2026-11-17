@@ -86,10 +86,32 @@ function whenText(tz, ms, minutes) {
 }
 
 async function settings() {
-  const rows = await db(`settings?owner_id=eq.${OWNER}&select=data,google_connected`);
-  const s = (rows[0] || {}).data || {};
+  const rows = await db(`settings?owner_id=eq.${OWNER}&select=data,status,google_connected`);
+  const s = (rows[0] || {}).data || {}; s._status = (rows[0] || {}).status || {};
   const B = Object.assign({ enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting', ownerName: 'Aroo' }, s.booking || {});
   return { s, B, tz: s.tz || 'Indian/Antananarivo', connected: (rows[0] || {}).google_connected };
+}
+/* "My Steps" task blocks that cannot be booked: blocks you placed by hand (pinned), tasks at risk,
+   and tasks due within 2 days. Other task blocks and habits stay bookable (they move if you accept). */
+async function protectedBlocks(s, tz, from, to) {
+  if (!s.calendarId) return [];
+  try {
+    let items = [], page = '';
+    do {
+      const r = await g(`https://www.googleapis.com/calendar/v3/calendars/${enc(s.calendarId)}/events?singleEvents=true&maxResults=2500&timeMin=${enc(new Date(from).toISOString())}&timeMax=${enc(new Date(to).toISOString())}${page ? '&pageToken=' + enc(page) : ''}`);
+      items = items.concat(r.items || []); page = r.nextPageToken || '';
+    } while (page);
+    const pr = e => ((e.extendedProperties || {}).private || {});
+    const blocks = items.filter(e => e.status !== 'cancelled' && e.start && e.start.dateTime && pr(e).mysteps_task && pr(e).mysteps_done !== '1');
+    if (!blocks.length) return [];
+    const soonDay = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(addLocalDays(tz, dayStartUtc(tz, Date.now()), 2) + 12 * HOUR));
+    const ids = [...new Set(blocks.map(e => pr(e).mysteps_task))];
+    let soon = new Set();
+    try { soon = new Set((await db(`tasks?owner_id=eq.${OWNER}&status=neq.Completed&due_date=lte.${soonDay}&id=in.(${ids.map(enc).join(',')})&select=id`)).map(t => t.id)); } catch (_) { /* keep pinned protection */ }
+    const risk = new Set(((s._status || {}).atRisk || []).map(String));
+    return blocks.filter(e => pr(e).mysteps_pin === '1' || soon.has(pr(e).mysteps_task) || risk.has(pr(e).mysteps_task))
+      .map(e => [Date.parse(e.start.dateTime), Date.parse(e.end.dateTime)]);
+  } catch (_) { return []; }
 }
 async function freeTime() {
   const { s, B, tz } = await settings();
@@ -100,7 +122,8 @@ async function freeTime() {
     body: { timeMin: new Date(from).toISOString(), timeMax: new Date(to).toISOString(), items: [{ id: 'primary' }] } });
   const bks = await db(`bookings?owner_id=eq.${OWNER}&status=in.(Pending,Accepted)&end_at=gt.${enc(new Date(from).toISOString())}&select=start_at,end_at`);
   const busy = ((fb.calendars || {}).primary || {}).busy || [];
-  const occ = busy.map(b => [Date.parse(b.start), Date.parse(b.end)]).concat(bks.map(b => [Date.parse(b.start_at), Date.parse(b.end_at)]));
+  const occ = busy.map(b => [Date.parse(b.start), Date.parse(b.end)]).concat(bks.map(b => [Date.parse(b.start_at), Date.parse(b.end_at)]),
+    await protectedBlocks(s, tz, from, to));
   const out = [];
   windowsOf(cat, from, to, tz).forEach(w => {
     let ps = [[Math.ceil(w[0] / (15 * MIN)) * 15 * MIN, w[1]]];
