@@ -124,6 +124,9 @@ const isScheduled = t => String(t['Auto schedule'] || '').trim().toUpperCase() =
 const isDoNow = t => String(t['Start now'] || '').trim().toLowerCase() === 'do now' || (SST().doingNow || []).includes(String(t.ID));
 const nextBlock = t => (SST().next || {})[t.ID] || null;
 const isAtRisk = t => (SST().atRisk || []).includes(String(t.ID));
+// ☀️ "Do today" task that could not fit in today's hours: minutes planned later
+const notTodayMin = t => (isTrue(t.Today) && !isDone(t) && (SST().notToday || {})[t.ID]) || 0;
+const minText = m => m < 60 ? m + ' min' : (Math.round(m / 15) / 4) + ' h';
 const isOverTime = t => (SST().overTime || []).includes(String(t.ID));
 // time category of a task: its own, else its category's, else its goal's, else the default
 function timeCat(t) {
@@ -248,6 +251,7 @@ function card(t, opts = {}) {
       if (isOverTime(t)) m.push('<span class="wait">⏱ planned time used, add hours or tick ✓</span>');
       else if (nextBlock(t)) m.push(`<span class="when">📅 ${esc(niceWhen(nextBlock(t)))}</span>`);
       if (isAtRisk(t)) m.push('<span class="over">⚠ at risk</span>');
+      if (notTodayMin(t)) m.push(`<span class="over">☀️ doesn't fit today · ${minText(notTodayMin(t))} moved later</span>`);
     }
     if (blockers(t).length) m.push('<span class="wait">⛓ waiting on a task</span>');
     if (t['Waiting on']) m.push(`<span class="wait">⏳ ${esc(t['Waiting on'])}</span>`);
@@ -645,7 +649,7 @@ function viewCalendar() {
   const habitRows = dayHabits.map(h => `<div class="ckrow habit"><span class="hb-ico">🌱</span><div class="ck-name">${esc(h.title)}<small> · reserved ${esc(new Date(h.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div></div>`).join('');
   const rows = open.concat(doneL).map(t => `<div class="ckrow ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
       <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
-      <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}</div></div>`).join('');
+      <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}${sel === td && notTodayMin(t) ? `<small class="ck-warn">☀️ doesn't fit today · ${minText(notTodayMin(t))} moved later</small>` : ''}</div></div>`).join('');
   const st = SST();
   return `${pageTop('Calendar')}
     <div id="reqs">${reqsHTML()}</div>
@@ -920,7 +924,7 @@ async function save(partial, msg) {
   }, msg);
   if (!r) return;
   const after = S.data.tasks.find(x => x.ID === (partial.ID || '')) || partial;
-  const touches = ['Auto schedule', 'Start now', 'Status', 'Est hours', 'Due date', 'Priority', 'Time category', 'Main goal', 'Category', 'Repeat'].some(k => k in partial);
+  const touches = ['Auto schedule', 'Start now', 'Today', 'Status', 'Est hours', 'Due date', 'Priority', 'Time category', 'Main goal', 'Category', 'Repeat'].some(k => k in partial);
   if (isAdmin() && touches && (isScheduled(after) || 'Auto schedule' in partial)) runSchedule(false);
 }
 // Ask the server to (re)plan; the screen is already updated, this only brings back the new times
@@ -1392,7 +1396,7 @@ const Demo = (() => {
     db.blocks = keepPinned.slice(); const next = {}, atRisk = [], now = Date.now();
     const pr = { High: 0, Medium: 1, Low: 2 };
     db.tasks.filter(t => t['Auto schedule'] === 'YES' && t.Status !== 'Completed' && Number(t['Est hours']) > 0)
-      .sort((a, b) => String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')) || (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3))
+      .sort((a, b) => (isTrue(b.Today) - isTrue(a.Today)) || String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')) || (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3))
       .forEach(t => {
         const cat = db.settings.categories.find(c => c.name === (t['Time category'] || db.settings.goalMap[t['Main goal']] || 'Working')) || db.settings.categories[0];
         let need = Number(t['Est hours']) * 3600000 - keepPinned.filter(b => b.taskId === t.ID).reduce((a, b) => a + b.e - b.s, 0);
@@ -1410,7 +1414,10 @@ const Demo = (() => {
         });
         if (need > 0 && t['Due date']) atRisk.push(t.ID);
       });
-    db.status = { lastRun: new Date().toISOString(), next, atRisk, doingNow: db.blocks.filter(b => b.pinned && b.s <= now && b.e > now).map(b => b.taskId), overTime: [] };
+    const endToday = new Date(); endToday.setHours(24, 0, 0, 0); const notToday = {};
+    db.tasks.filter(t => t.Today && t['Auto schedule'] === 'YES' && t.Status !== 'Completed').forEach(t => {
+      const later = db.blocks.filter(b => b.taskId === t.ID && b.s >= endToday.getTime()).reduce((a, b) => a + b.e - b.s, 0); if (later) notToday[t.ID] = Math.round(later / 60000); });
+    db.status = { lastRun: new Date().toISOString(), next, atRisk, notToday, doingNow: db.blocks.filter(b => b.pinned && b.s <= now && b.e > now).map(b => b.taskId), overTime: [] };
   }
   db.tasks.forEach(t => { if (t.Reclaim === 'YES') t['Auto schedule'] = 'YES'; });
   demoPlan();

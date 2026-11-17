@@ -479,3 +479,4 @@ details.advanced[open] summary{margin-bottom:10px}
 .daypick button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .daypick.quick button{flex:0 0 auto;padding:4px 10px;font-size:12px;border-radius:99px}
 .hint{display:block;color:var(--muted);font-size:12px;margin-top:4px;font-weight:400}
+.ck-warn{display:block;color:var(--danger);font-size:12px;font-weight:600;margin-top:2px}

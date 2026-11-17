@@ -198,28 +198,34 @@ function plan(input) {
   input.tasks.forEach(t => { taskIds[t.id] = true; });
   Object.keys(byTask).forEach(tid => { if (!taskIds[tid]) byTask[tid].forEach(ev => leftover.push(ev)); });
 
-  input.tasks.forEach(t => {                                   // 1. keep valid blocks
-    blocks[t.id] = []; let kept = 0;
-    (byTask[t.id] || []).slice().sort((a, b) => a.start - b.start).forEach(ev => {
-      const dur = ev.end - ev.start;
-      if (input.mode !== 'full' && ev.start >= input.now && inWindows(t.windows, ev.start, ev.end) && !overlaps(ev.start, ev.end) && kept + dur <= t.remaining + step / 2) {
-        occ.push([ev.start, ev.end]); kept += dur; blocks[t.id].push([ev.start, ev.end, ev.id]);
-      } else leftover.push(ev);
-    });
-    t._need = Math.max(0, t.remaining - kept);
-  });
   const created = [];
-  input.tasks.forEach(t => {                                   // 2. place what is still needed
-    let need = t._need, guard = 0;
-    while (need > 0 && guard++ < 200) {
-      const want = Math.min(ceilStep(need), t.maxBlock), minLen = Math.min(t.minBlock, ceilStep(need));
-      const seg = free(t.windows, ceilStep(input.now)).find(p => p[1] - p[0] >= minLen);
-      if (!seg) break;
-      const len = Math.min(want, floorStep(seg[1] - seg[0]));
-      occ.push([seg[0], seg[0] + len]); created.push({ taskId: t.id, start: seg[0], end: seg[0] + len });
-      blocks[t.id].push([seg[0], seg[0] + len, null]); need -= len;
-    }
-    if (need > 0) unplaced[t.id] = need;
+  // "Do today" / Do now tasks (t.first) go first: they are kept or placed before the others,
+  // so they can take today's free time even from blocks already planned for other tasks.
+  const groups = [input.tasks.filter(t => t.first), input.tasks.filter(t => !t.first)];
+  groups.forEach(group => {
+    group.forEach(t => {                                       // 1. keep valid blocks
+      blocks[t.id] = []; let kept = 0;
+      (byTask[t.id] || []).slice().sort((a, b) => a.start - b.start).forEach(ev => {
+        const dur = ev.end - ev.start;
+        const todayOk = !t.first || !input.todayEnd || ev.end <= input.todayEnd;   // a "Do today" block planned for later is moved
+        if (input.mode !== 'full' && todayOk && ev.start >= input.now && inWindows(t.windows, ev.start, ev.end) && !overlaps(ev.start, ev.end) && kept + dur <= t.remaining + step / 2) {
+          occ.push([ev.start, ev.end]); kept += dur; blocks[t.id].push([ev.start, ev.end, ev.id]);
+        } else leftover.push(ev);
+      });
+      t._need = Math.max(0, t.remaining - kept);
+    });
+    group.forEach(t => {                                       // 2. place what is still needed
+      let need = t._need, guard = 0;
+      while (need > 0 && guard++ < 200) {
+        const want = Math.min(ceilStep(need), t.maxBlock), minLen = Math.min(t.minBlock, ceilStep(need));
+        const seg = free(t.windows, ceilStep(input.now)).find(p => p[1] - p[0] >= minLen);
+        if (!seg) break;
+        const len = Math.min(want, floorStep(seg[1] - seg[0]));
+        occ.push([seg[0], seg[0] + len]); created.push({ taskId: t.id, start: seg[0], end: seg[0] + len });
+        blocks[t.id].push([seg[0], seg[0] + len, null]); need -= len;
+      }
+      if (need > 0) unplaced[t.id] = need;
+    });
   });
   const updates = [];
   if (input.mode !== 'full') {                                 // 3. fill free time in the next 24 h
@@ -306,8 +312,8 @@ async function withLock(owner, fn) {
 }
 function rank(t) {
   const pr = { High: 0, Medium: 1, Low: 2 }[t.priority];
-  // order: Do now first, then earliest due date (no due date last), then priority
-  return [t.start_now === 'do now' ? 0 : 1, t.due_date ? Date.parse(t.due_date) : 9e15, pr === undefined ? 3 : pr];
+  // order: Do now, then "Do today", then earliest due date (no due date last), then priority
+  return [t.start_now === 'do now' ? 0 : 1, t.today ? 0 : 1, t.due_date ? Date.parse(t.due_date) : 9e15, pr === undefined ? 3 : pr];
 }
 const cmp = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
 const prop = (e, k) => ((e.extendedProperties || {}).private || {})[k];
@@ -394,7 +400,7 @@ async function schedule(owner, mode = 'incremental') {
       // (Time is counted per round of the estimate, so a round that is half done keeps only its rest.)
       const est = Math.round(Number(t.est_hours) * 60) * MIN, inRound = est > 0 ? Math.round(used / MIN) * MIN % est : 0;
       const replanned = used > 0 && inRound === 0;
-      return { id: t.id, t, rank: rank(t), remaining: est - inRound, replanned, dueEnd: due,
+      return { id: t.id, t, rank: rank(t), first: !!t.today || t.start_now === 'do now', remaining: est - inRound, replanned, dueEnd: due,
         windows: windowsOf(catFor(s, t), now, horizonEnd, tz), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN };
     }).sort((a, b) => cmp(a.rank, b.rank));
     const existing = live.filter(b => !b.pinned && b.start >= now).map(b => ({ id: b.id, taskId: b.taskId, start: b.start, end: b.end }));
@@ -405,14 +411,16 @@ async function schedule(owner, mode = 'incremental') {
     const exHabit = {}; habitEv.forEach(e => { if (!exHabit[e.key]) exHabit[e.key] = e; });
     const occs = habitOccurrences(habits, tz, today, horizonEnd, now);
     let H = placeHabits(occs, busy, exHabit, now, mode);
-    let p = plan({ now, step: STEP, tasks: items, busy: busy.concat(H.placed.map(h => [h.start, h.end])), existing, mode, pullLimit: 3, horizon: horizonEnd });
+    let p = plan({ now, step: STEP, tasks: items, busy: busy.concat(H.placed.map(h => [h.start, h.end])), existing, mode, pullLimit: 3, horizon: horizonEnd, todayEnd: addLocalDays(tz, today, 1) });
     // if a task due today or tomorrow would miss its due date, habits up to that day give way
     const urgentEnd = addLocalDays(tz, today, 2);
-    const urgent = items.filter(x => x.dueEnd && x.dueEnd < urgentEnd && p.atRisk.includes(x.id));
+    const todayEnd = addLocalDays(tz, today, 1);
+    const missesToday = x => x.first && x.remaining > 0 && (p.unplaced[x.id] || (p.blocks[x.id] || []).some(b => b[1] > todayEnd));
+    const urgent = items.filter(x => (x.dueEnd && x.dueEnd < urgentEnd && p.atRisk.includes(x.id)) || missesToday(x));
     if (urgent.length && H.placed.length) {
-      const until = Math.max(...urgent.map(x => x.dueEnd));
+      const until = Math.max(...urgent.map(x => (x.dueEnd && x.dueEnd < urgentEnd && p.atRisk.includes(x.id)) ? x.dueEnd : todayEnd - 1));   // "Do today" only frees today's habits
       const locked = H.placed.filter(h => h.day > until), released = occs.filter(o => o.day <= until);
-      p = plan({ now, step: STEP, tasks: items, busy: busy.concat(locked.map(h => [h.start, h.end])), existing, mode, pullLimit: 0, horizon: horizonEnd });
+      p = plan({ now, step: STEP, tasks: items, busy: busy.concat(locked.map(h => [h.start, h.end])), existing, mode, pullLimit: 0, horizon: horizonEnd, todayEnd: addLocalDays(tz, today, 1) });
       const taskBlocks = []; Object.values(p.blocks).forEach(bs => bs.forEach(b => taskBlocks.push([b[0], b[1]])));
       const H2 = placeHabits(released, busy.concat(locked.map(h => [h.start, h.end]), taskBlocks), exHabit, now, 'full');
       H = { placed: locked.concat(H2.placed), skipped: H.skipped.filter(k => !released.some(o => o.key === k)).concat(H2.skipped) };
@@ -443,7 +451,13 @@ async function schedule(owner, mode = 'incremental') {
     const status = { lastRun: new Date().toISOString(), mode, writes, atRisk: p.atRisk,
       unplaced: Object.fromEntries(Object.entries(p.unplaced).map(([k, v]) => [k, Math.round(v / MIN)])), next,
       doingNow: live.filter(b => b.now && b.start <= nowExact && b.end > nowExact).map(b => b.taskId),
-      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id), habitsSkipped: H.skipped };
+      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id), habitsSkipped: H.skipped,
+      // "Do today" tasks that did not fit today: minutes planned after today (or not planned at all)
+      notToday: Object.fromEntries(items.filter(x => x.t.today).map(x => {
+        const tEnd = addLocalDays(tz, today, 1);
+        const later = (p.blocks[x.id] || []).filter(b => b[0] >= tEnd).reduce((a, b) => a + b[1] - b[0], 0) + (p.unplaced[x.id] || 0);
+        return [x.id, Math.round(later / MIN)];
+      }).filter(e => e[1] > 0)) };
     await db(`settings?owner_id=eq.${owner}`, { method: 'PATCH', body: { status }, prefer: 'return=minimal' });
     return status;
   });
