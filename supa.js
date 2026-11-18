@@ -188,7 +188,7 @@ async function call(action, p = {}) {
     }
     case 'bookingDecide': { const r = await fn('owner', { action, id: p.id, accept: !!p.accept, bookingUrl: p.bookingUrl || '' }); return Object.assign(r, { bookings: (await call('bookings')).bookings }); }
     case 'settingsGet': { const r = await fn('owner', { action }); return { ok: true, settings: r.settings, usage: r.status || {} }; }
-    case 'sync': case 'schedule': case 'calendar': case 'moveBlock': case 'unpinBlock': case 'settingsSave':
+    case 'sync': case 'schedule': case 'calendar': case 'moveBlock': case 'unpinBlock': case 'settingsSave': case 'skipMissed':
       return fn('owner', Object.assign({}, p, { action: action === 'sync' ? 'schedule' : action }));
     case 'password': {
       if (!p.newPassword || p.newPassword.length < 8) throw new Error('The new password needs 8+ characters');

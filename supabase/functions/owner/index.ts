@@ -348,7 +348,7 @@ async function schedule(owner, mode = 'incremental') {
     const busy = mainEv.filter(isBusy).map(e => [evStart(e), evEnd(e)]);
     const all = myEv.filter(e => prop(e, 'mysteps_task') && e.start.dateTime).map(e => ({
       id: e.id, taskId: prop(e, 'mysteps_task'), pinned: prop(e, 'mysteps_pin') === '1', now: prop(e, 'mysteps_now') === '1',
-      done: prop(e, 'mysteps_done') === '1', summary: e.summary || '', start: evStart(e), end: evEnd(e) }));
+      done: prop(e, 'mysteps_done') === '1', missed: prop(e, 'mysteps_missed') === '1', summary: e.summary || '', start: evStart(e), end: evEnd(e) }));
     const open = {}; tasks.forEach(t => { open[t.id] = t; });
 
     // Blocks of tasks that are no longer open. Completed tasks keep their history in the calendar:
@@ -376,7 +376,7 @@ async function schedule(owner, mode = 'incremental') {
           b.end = now; if (doneAt !== undefined) b.done = true;
         } else if (b.start >= now) {                                           // future: free the time
           await g(owner, evUrl(b.id), { method: 'DELETE' }); writes++; b.gone = true;
-        } else if (doneAt !== undefined && !b.done) {                          // past: mark as done (once)
+        } else if (doneAt !== undefined && !b.done && !b.missed) {             // past: mark as done (once)
           await g(owner, evUrl(b.id), { method: 'PATCH', body: doneBody(b) }); writes++; b.done = true;
         }
       }
@@ -394,7 +394,7 @@ async function schedule(owner, mode = 'incremental') {
     const live = all.filter(b => !b.gone);
     live.filter(b => b.pinned || (b.start < now && b.end > now)).forEach(b => { if (b.end > now) busy.push([b.start, b.end]); });
     const items = tasks.map(t => {
-      const used = live.filter(b => b.taskId === t.id && (b.start < now || b.pinned)).reduce((a, b) => a + b.end - b.start, 0);
+      const used = live.filter(b => b.taskId === t.id && !b.missed && (b.start < now || b.pinned)).reduce((a, b) => a + b.end - b.start, 0);
       const due = t.due_date ? (p => localToUtc(tz, p[0], p[1], p[2], 23, 59))(t.due_date.split('-').map(Number)) : null;
       // Planned time passed but the task is not ticked done: plan its estimated time again.
       // (Time is counted per round of the estimate, so a round that is half done keeps only its rest.)
@@ -455,9 +455,14 @@ async function schedule(owner, mode = 'incremental') {
       // tasks with time planned today (earlier today included), for the Home page
       todayDate: new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(today + 12 * HOUR)),
       todayTasks: (() => { const tEnd = addLocalDays(tz, today, 1), ids = new Set();
-        live.filter(b => b.start < now && b.end > today).forEach(b => ids.add(String(b.taskId)));
-        Object.entries(p.blocks).forEach(([id, bs]) => { if (bs.some(b => b[0] < tEnd && b[1] > today)) ids.add(String(id)); });
+        live.filter(b => b.start < now && b.end > now && !b.missed).forEach(b => ids.add(String(b.taskId)));   // ongoing now
+        Object.entries(p.blocks).forEach(([id, bs]) => { if (bs.some(b => b[0] < tEnd && b[1] > now)) ids.add(String(id)); });
         return [...ids]; })(),
+      // open tasks whose planned time passed recently (today, yesterday): minutes, for the "↷ Didn't do it" button
+      missable: (() => { const from = addLocalDays(tz, today, -1), out = {};
+        live.filter(b => open[b.taskId] && !b.done && !b.missed && b.start < now && b.start >= from)
+          .forEach(b => { out[b.taskId] = (out[b.taskId] || 0) + Math.round((Math.min(b.end, now) - b.start) / MIN); });
+        return out; })(),
       // "Do today" tasks that did not fit today: minutes planned after today (or not planned at all)
       notToday: Object.fromEntries(items.filter(x => x.t.today).map(x => {
         const tEnd = addLocalDays(tz, today, 1);
@@ -467,6 +472,22 @@ async function schedule(owner, mode = 'incremental') {
     await db(`settings?owner_id=eq.${owner}`, { method: 'PATCH', body: { status }, prefer: 'return=minimal' });
     return status;
   });
+}
+
+/* "↷ Didn't do it": the planned time of a task that has passed was not used.
+   Those blocks stay in the calendar as history (marked ↷), are not counted as time spent, and the task is planned again. */
+async function skipMissed(owner, taskId) {
+  const { s } = await loadSettings(owner), cal = await ensureCalendar(owner, s), nowExact = Date.now();
+  const evs = (await listEvents(owner, cal, nowExact - 14 * DAY, nowExact + DAY))
+    .filter(e => prop(e, 'mysteps_task') === String(taskId) && e.start.dateTime && prop(e, 'mysteps_done') !== '1' && prop(e, 'mysteps_missed') !== '1' && evStart(e) < nowExact);
+  for (const e of evs) {
+    const priv = { ...((e.extendedProperties || {}).private || {}), mysteps_missed: '1', mysteps_pin: '1', mysteps_now: '0' };
+    const body = { summary: (e.summary || '').startsWith('↷ ') ? e.summary : '↷ ' + (e.summary || ''), extendedProperties: { private: priv } };
+    if (evEnd(e) > nowExact) body.end = { dateTime: new Date(Math.max(evStart(e) + 5 * MIN, Math.floor(nowExact / (5 * MIN)) * 5 * MIN)).toISOString() };
+    await g(owner, `calendars/${enc(cal)}/events/${e.id}`, { method: 'PATCH', body });
+  }
+  const status = await schedule(owner, 'incremental');
+  return { marked: evs.length, status };
 }
 
 /* ================= other actions ================= */
@@ -589,6 +610,7 @@ Deno.serve(async req => {
       case 'calendar': return json({ ok: true, cal: await calendarData(owner, body.from, body.to) });
       case 'moveBlock': return json({ ok: true, status: await moveBlock(owner, body.id, body.start, body.end, true) });
       case 'unpinBlock': return json({ ok: true, status: await moveBlock(owner, body.id, null, null, false) });
+      case 'skipMissed': return json({ ok: true, ...(await skipMissed(owner, body.id)) });
       case 'settingsGet': { const { s, status } = await loadSettings(owner); return json({ ok: true, settings: s, status }); }
       case 'settingsSave': {
         const { s } = await loadSettings(owner); const ns = cleanSettings(s, body.settings || {});

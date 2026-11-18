@@ -480,3 +480,10 @@ details.advanced[open] summary{margin-bottom:10px}
 .daypick.quick button{flex:0 0 auto;padding:4px 10px;font-size:12px;border-radius:99px}
 .hint{display:block;color:var(--muted);font-size:12px;margin-top:4px;font-weight:400}
 .ck-warn{display:block;color:var(--danger);font-size:12px;font-weight:600;margin-top:2px}
+.ck-skip{flex:none;border:1px solid var(--line);background:transparent;border-radius:99px;width:34px;height:34px;font-size:16px;color:var(--muted);cursor:pointer}
+.ck-skip:hover{border-color:var(--accent);color:var(--accent)}
+.mg-t.mg-bk{background:rgba(242,101,79,.16);border-left-color:var(--coral)}
+.mg-t.mg-bk.pend{font-weight:700}
+.ckrow.meet{border-left-color:var(--coral)}
+.ckrow.meet .ck-name small{display:block;font-weight:500;color:var(--muted);font-size:12px;margin-top:2px}
+.ckrow.meet .mt-acts{display:flex;gap:8px;margin-top:8px}

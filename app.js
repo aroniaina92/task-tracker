@@ -126,6 +126,8 @@ const nextBlock = t => (SST().next || {})[t.ID] || null;
 const isAtRisk = t => (SST().atRisk || []).includes(String(t.ID));
 // ☀️ "Do today" task that could not fit in today's hours: minutes planned later
 const notTodayMin = t => (isTrue(t.Today) && !isDone(t) && (SST().notToday || {})[t.ID]) || 0;
+// planned time that passed recently without the task being ticked (for "↷ Didn't do it")
+const missMin = t => (isAdmin() && !isDone(t) && (SST().missable || {})[t.ID]) || 0;
 const minText = m => m < 60 ? m + ' min' : (Math.round(m / 15) / 4) + ' h';
 const isOverTime = t => (SST().overTime || []).includes(String(t.ID));
 // time category of a task: its own, else its category's, else its goal's, else the default
@@ -263,6 +265,7 @@ function card(t, opts = {}) {
     if (isAdmin()) {
       acts.push(`<button class="pill ${isScheduled(t) ? 'on' : ''}" data-act="sched" aria-pressed="${isScheduled(t)}">📅 ${isScheduled(t) ? 'Scheduled' : 'Schedule'}</button>`);
       acts.push(`<button class="pill now ${isDoNow(t) ? 'on' : ''}" data-act="donow" aria-pressed="${isDoNow(t)}">▶ ${isDoNow(t) ? 'Doing now' : 'Do now'}</button>`);
+      if (missMin(t)) acts.push(`<button class="pill" data-act="missed" title="Its planned time passed (${minText(missMin(t))}) and you did not work on it">↷ Didn't do it</button>`);
     }
   }
   return `<article class="task ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" style="--h:${hue(t['Main goal'])}" data-id="${esc(t.ID)}">
@@ -642,19 +645,28 @@ function viewCalendar() {
   const cal = entry && entry.list, map = cal ? tasksByDay(cal) : {};
   const title = new Date(ym + '-15T12:00:00').toLocaleDateString([], { month: 'long', year: 'numeric' });
   const head = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => `<div class="mg-h">${d}</div>`).join('');
+  const bks = allBookings(cal).filter(b => b.status === 'Pending' || b.status === 'Accepted');
+  const bkOn = d => bks.filter(b => localDay(b.start) === d).sort((a, b) => a.start.localeCompare(b.start));
   const cells = g.days.map(d => {
     const list = (map[d] || []).map(taskOf), shown = list.slice(0, 3);
+    const meet = bkOn(d).map(b => `<span class="mg-t mg-bk ${b.status === 'Pending' ? 'pend' : ''}">${b.status === 'Pending' ? '📩' : '🤝'} ${esc(b.name)}</span>`).join('');
     return `<button type="button" class="mg-d ${d.slice(0, 7) !== ym ? 'out' : ''} ${d === td ? 'today' : ''} ${d === sel ? 'sel' : ''}" data-act="cal-day" data-v="${d}">
-      <span class="mg-n">${Number(d.slice(8))}</span>
+      <span class="mg-n">${Number(d.slice(8))}</span>${meet}
       ${shown.map(t => `<span class="mg-t ${isDone(t) ? 'done' : ''}" style="--h:${hue(t['Main goal'])}">${esc(String(t.Task || '').replace(/^[^\p{L}\p{N}]+/u, '') || t.Task)}</span>`).join('')}
       ${list.length > 3 ? `<span class="mg-more">+${list.length - 3}</span>` : ''}</button>`;
   }).join('');
   const dayList = (map[sel] || []).map(taskOf), open = dayList.filter(t => !isDone(t)), doneL = dayList.filter(isDone);
   const dayHabits = cal ? (cal.habits || []).filter(h => localDay(h.start) === sel).sort((a, b) => a.start.localeCompare(b.start)) : [];
+  const hm = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const meetRows = bkOn(sel).map(b => b.status === 'Pending'
+    ? `<div class="ckrow meet pend" data-bid="${esc(b.id)}"><span class="hb-ico">📩</span><div class="ck-name">${esc(b.name)}<small>Request · ${hm(b.start)} · ${b.minutes} min${b.topic ? ' · ' + esc(b.topic) : ''}</small>
+        <span class="mt-acts"><button class="btn small" data-act="bk-decline">Decline</button><button class="btn primary small" data-act="bk-accept">Accept</button></span></div></div>`
+    : `<div class="ckrow meet"><span class="hb-ico">🤝</span><div class="ck-name">Meeting with ${esc(b.name)}<small>${hm(b.start)} · ${b.minutes} min${b.meet ? ` · <a href="${esc(b.meet)}" target="_blank" rel="noopener">Meet link</a>` : ''}</small></div></div>`).join('');
   const habitRows = dayHabits.map(h => `<div class="ckrow habit"><span class="hb-ico">🌱</span><div class="ck-name">${esc(h.title)}<small> · reserved ${esc(new Date(h.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div></div>`).join('');
   const rows = open.concat(doneL).map(t => `<div class="ckrow ${isDone(t) ? 'done' : ''} ${isDoNow(t) && !isDone(t) ? 'doing' : ''}" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
       <button class="tick" data-act="done" aria-label="${isDone(t) ? 'Mark as not done' : 'Mark as done'}">${CHECK}</button>
-      <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}${sel === td && notTodayMin(t) ? `<small class="ck-warn">☀️ doesn't fit today · ${minText(notTodayMin(t))} moved later</small>` : ''}</div></div>`).join('');
+      <div class="ck-name" data-act="open">${esc(t.Task)}${isAtRisk(t) && !isDone(t) ? ' <span class="ck-risk" title="May not finish before the due date">⚠</span>' : ''}${sel === td && notTodayMin(t) ? `<small class="ck-warn">☀️ doesn't fit today · ${minText(notTodayMin(t))} moved later</small>` : ''}</div>
+      ${sel <= td && missMin(t) ? `<button class="ck-skip" data-act="missed" title="Didn't do it: plan this time again">↷</button>` : ''}</div>`).join('');
   const st = SST();
   return `${pageTop('Calendar')}
     <div id="reqs">${reqsHTML()}</div>
@@ -664,7 +676,7 @@ function viewCalendar() {
       ${cal && cal.error ? `<div class="empty">Could not load your plan: ${esc(cal.error)} <button class="btn small" data-act="cal-reload">Try again</button></div>` : ''}
       <div class="mg ${cal ? '' : 'loading'}">${head}${cells}</div></div>
     <div class="sec-h"><h2>${esc(dayTitle(sel))} <span class="n">${open.length}</span></h2><button class="link" data-act="sync">↻ Re-plan</button></div>
-    ${!cal ? '<div class="skel"></div>' : rows || habitRows ? `<div class="card cklist">${rows}${habitRows}</div>` : '<div class="empty">Nothing planned this day.</div>'}
+    ${!cal ? '<div class="skel"></div>' : rows || habitRows || meetRows ? `<div class="card cklist">${meetRows}${rows}${habitRows}</div>` : '<div class="empty">Nothing planned this day.</div>'}
     <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) + ' · ' : ''}Times and reminders are in Google Calendar.</p>
     ${habitsHTML()}
     <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
@@ -725,10 +737,14 @@ function reqsHTML() {
       <div class="req-a"><button class="btn small" data-act="bk-decline">Decline</button><button class="btn primary small" data-act="bk-accept">Accept + send Meet link</button></div></div>`).join('');
 }
 async function loadBookings() {
-  try { const r = await api('bookings'); S.bookings = r.bookings; const el = $('#reqs'); if (el) el.innerHTML = reqsHTML(); } catch (e) {}
+  try { const r = await api('bookings'); S.bookings = r.bookings; }
+  catch (e) { /* offline: keep what we have */ }
+  finally { S.bkLoading = false; S.bkAt = Date.now(); if (S.view === 'calendar') render(); }
 }
+const allBookings = cal => { const m = {}; ((cal && cal.bookings) || []).concat(S.bookings || []).forEach(b => { m[b.id] = b; }); return Object.values(m); };
 async function decideBooking(id, accept) {
-  const b = (S.bookings || []).find(x => x.id === id); if (!b) return;
+  const b = (S.bookings || []).find(x => x.id === id) || Object.values(calCache).flatMap(e => (e && e.list && e.list.bookings) || []).find(x => x.id === id);
+  if (!b) { toast('Request not found · reloading'); S.bkAt = 0; render(); return; }
   if (!confirm(accept ? `Accept ${b.name} (${b.minutes} min, ${niceWhen(b.start)})? A Google Meet link will be emailed.` : `Decline ${b.name}'s request? They will get a polite email.`)) return;
   syncing(true, accept ? 'Accepting…' : 'Declining…');
   try {
@@ -897,7 +913,10 @@ function render() {
   $('#app').innerHTML = `<div id="offbar">${offbarHTML()}</div><main class="page">${VIEWS[S.view]()}</main>`;
   document.querySelectorAll('#nav [data-view]').forEach(b => b.setAttribute('aria-current', b.dataset.view === S.view || (b.dataset.view === 'tasks' && S.view === 'easy')));
   const dot = document.querySelector('#nav [data-view="calendar"]'); if (dot) dot.classList.toggle('has-dot', !!(SCH() && SCH().pendingBookings));
-  if (S.view === 'calendar' && isAdmin() && SCH() && SCH().ready && !S.bookingsLoaded) { S.bookingsLoaded = true; loadBookings(); }
+  if (S.view === 'calendar' && isAdmin() && SCH() && SCH().ready && !S.bkLoading) {
+    const since = Date.now() - (S.bkAt || 0), have = (S.bookings || []).filter(b => b.status === 'Pending').length;
+    if (since > 30000 || (have !== (SCH().pendingBookings || 0) && since > 5000)) { S.bkLoading = true; loadBookings(); }
+  }
   if (focus) { const i = $(`[data-f="${focus}"]`); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
 }
 const nameKey = x => String(x || '').normalize('NFC').replace(/[\uFE0F\s]+/g, '').toLowerCase();
@@ -1291,6 +1310,16 @@ document.addEventListener('click', async e => {
     case 'fclear': Object.assign(S.f, { goal: '', cat: '', obj: '' }); render(); break;
     case 'refresh': refresh(true); break;
     case 'sync-now': flushQueue(); break;
+    case 'missed': {
+      if (!t) break;
+      if (!navigator.onLine) { toast('This needs internet'); break; }
+      syncing(true, 'Re-planning…');
+      try {
+        const r = await api('skipMissed', { id: t.ID }); calCache = {}; await refresh(false);
+        toast(r.marked ? `Marked as not done · ${t.Task.replace(/^[^\p{L}\p{N}]+/u, '')} planned again` : 'Nothing to mark');
+      } catch (e) { toast(isOffline(e) ? 'This needs internet' : 'Not done: ' + e.message); } finally { syncing(false); }
+      break;
+    }
     case 'habit-new': openHabit(null); break;
     case 'habit-open': openHabit((S.data.habits || []).find(h => h.ID === a.dataset.hid)); break;
     case 'hf-day': { const d = Number(a.dataset.v); S.habitForm.days.has(d) ? S.habitForm.days.delete(d) : S.habitForm.days.add(d); a.setAttribute('aria-pressed', S.habitForm.days.has(d)); break; }
