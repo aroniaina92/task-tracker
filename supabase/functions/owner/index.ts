@@ -117,12 +117,14 @@ const hm = s => { const q = String(s).split(':').map(Number); return q[0] * 60 +
 function fmtLocal(tz, ms, opts) { return new Intl.DateTimeFormat('en-GB', { timeZone: tz, ...opts }).format(new Date(ms)); }
 
 /* windows of one time category: [[startMs, endMs], ...] */
-function windowsOf(cat, fromMs, toMs, tz) {
+function windowsOf(cat, fromMs, toMs, tz, extra) {
   const out = [];
   if (!cat) return out;
   for (let d = dayStartUtc(tz, fromMs); d < toMs; d = addLocalDays(tz, d, 1)) {
     const p = parts(tz, d + 12 * HOUR), dow = new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay();
-    ((cat.slots || {})[dow] || []).forEach(r => {
+    const dayKey = `${p.y}-${String(p.m).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+    const special = extra && cat.name === (extra.category || 'Working') && (extra.dates || []).includes(dayKey) ? (extra.slots || []) : [];
+    ((cat.slots || {})[dow] || []).concat(special).forEach(r => {
       const a = hm(r[0]), b = hm(r[1]);
       const s = localToUtc(tz, p.y, p.m, p.d, Math.floor(a / 60), a % 60), e = localToUtc(tz, p.y, p.m, p.d, Math.floor(b / 60), b % 60);
       if (e > s && e > fromMs && s < toMs) out.push([Math.max(s, fromMs), Math.min(e, toMs)]);
@@ -141,7 +143,9 @@ function defaultSettings() {
     categories: [{ name: 'Working', color: '#0a8f8a', slots: sl(wk, [['08:30', '12:30'], ['14:30', '17:30']]) },
       { name: 'Personal', color: '#f2654f', slots: personal }, { name: 'Spafi', color: '#8e6cf0', slots: spafi }],
     goalMap: {}, catMap: {}, defaultCategory: 'Working', minBlock: 30, maxBlock: 120, horizonDays: 7, calendarId: '',
-    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' }
+    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' },
+    // extra working session on chosen days (e.g. a Saturday): its hours are added to the Working time category on those dates
+    extra: { category: 'Working', slots: [['08:30', '12:30'], ['14:30', '17:30']], dates: [] }
   };
 }
 async function loadSettings(owner) {
@@ -149,6 +153,7 @@ async function loadSettings(owner) {
   if (!rows.length) rows = await db('settings', { method: 'POST', body: { owner_id: owner, data: {} } });
   const d = defaultSettings(), s = Object.assign({}, d, rows[0].data || {});
   s.booking = Object.assign({}, d.booking, s.booking || {});
+  s.extra = Object.assign({}, d.extra, s.extra || {});
   return { s, status: rows[0].status || {}, connected: rows[0].google_connected };
 }
 const saveSettingsData = (owner, s) => db(`settings?owner_id=eq.${owner}`, { method: 'PATCH', body: { data: s, updated_at: new Date().toISOString() } });
@@ -199,6 +204,9 @@ function plan(input) {
   Object.keys(byTask).forEach(tid => { if (!taskIds[tid]) byTask[tid].forEach(ev => leftover.push(ev)); });
 
   const created = [];
+  // earliest start of a task: its "not before" date, and the end of the planned time of the tasks it waits on
+  const earliest = t => Math.max(ceilStep(input.now), t.notBefore || 0,
+    ...(t.after || []).map(id => Math.max(0, ...((blocks[id] || []).map(b => b[1])))));
   // "Do today" / Do now tasks (t.first) go first: they are kept or placed before the others,
   // so they can take today's free time even from blocks already planned for other tasks.
   const groups = [input.tasks.filter(t => t.first), input.tasks.filter(t => !t.first)];
@@ -208,7 +216,7 @@ function plan(input) {
       (byTask[t.id] || []).slice().sort((a, b) => a.start - b.start).forEach(ev => {
         const dur = ev.end - ev.start;
         const todayOk = !t.first || !input.todayEnd || ev.end <= input.todayEnd;   // a "Do today" block planned for later is moved
-        if (input.mode !== 'full' && todayOk && ev.start >= input.now && inWindows(t.windows, ev.start, ev.end) && !overlaps(ev.start, ev.end) && kept + dur <= t.remaining + step / 2) {
+        if (input.mode !== 'full' && todayOk && !(t.after && t.after.length) && ev.start >= earliest(t) && inWindows(t.windows, ev.start, ev.end) && !overlaps(ev.start, ev.end) && kept + dur <= t.remaining + step / 2) {
           occ.push([ev.start, ev.end]); kept += dur; blocks[t.id].push([ev.start, ev.end, ev.id]);
         } else leftover.push(ev);
       });
@@ -218,7 +226,7 @@ function plan(input) {
       let need = t._need, guard = 0;
       while (need > 0 && guard++ < 200) {
         const want = Math.min(ceilStep(need), t.maxBlock), minLen = Math.min(t.minBlock, ceilStep(need));
-        const seg = free(t.windows, ceilStep(input.now)).find(p => p[1] - p[0] >= minLen);
+        const seg = free(t.windows, earliest(t)).find(p => p[1] - p[0] >= minLen);
         if (!seg) break;
         const len = Math.min(want, floorStep(seg[1] - seg[0]));
         occ.push([seg[0], seg[0] + len]); created.push({ taskId: t.id, start: seg[0], end: seg[0] + len });
@@ -232,7 +240,7 @@ function plan(input) {
     let pulls = 0; const horizon = input.now + DAY;
     input.tasks.forEach(t => {
       if (pulls >= (input.pullLimit || 0)) return;
-      const segs = free(t.windows, ceilStep(input.now)).filter(p => p[0] < horizon);
+      const segs = free(t.windows, earliest(t)).filter(p => p[0] < horizon);
       let later = null, seg = null;
       blocks[t.id].filter(b => b[2]).sort((a, b) => a[0] - b[0]).some(b => {
         seg = segs.find(p => b[0] >= p[0] + HOUR && b[1] - b[0] <= p[1] - p[0]); if (seg) { later = b; return true; } return false;
@@ -393,7 +401,7 @@ async function schedule(owner, mode = 'incremental') {
     }
     const live = all.filter(b => !b.gone);
     live.filter(b => b.pinned || (b.start < now && b.end > now)).forEach(b => { if (b.end > now) busy.push([b.start, b.end]); });
-    const items = tasks.map(t => {
+    let items = tasks.map(t => {
       const used = live.filter(b => b.taskId === t.id && !b.missed && (b.start < now || b.pinned)).reduce((a, b) => a + b.end - b.start, 0);
       const due = t.due_date ? (p => localToUtc(tz, p[0], p[1], p[2], 23, 59))(t.due_date.split('-').map(Number)) : null;
       // Planned time passed but the task is not ticked done: plan its estimated time again.
@@ -401,8 +409,27 @@ async function schedule(owner, mode = 'incremental') {
       const est = Math.round(Number(t.est_hours) * 60) * MIN, inRound = est > 0 ? Math.round(used / MIN) * MIN % est : 0;
       const replanned = used > 0 && inRound === 0;
       return { id: t.id, t, rank: rank(t), first: !!t.today || t.start_now === 'do now', remaining: est - inRound, replanned, dueEnd: due,
-        windows: windowsOf(catFor(s, t), now, horizonEnd, tz), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN };
+        windows: windowsOf(catFor(s, t), now, horizonEnd, tz, s.extra), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN,
+        notBefore: t.scheduled_date ? (p => localToUtc(tz, p[0], p[1], p[2], 0, 0))(t.scheduled_date.split('-').map(Number)) : 0 };
     }).sort((a, b) => cmp(a.rank, b.rank));
+    // Dependencies ("waits on" another task, by name or ID): the task is planned after the tasks it waits on.
+    // If such a task is open but not scheduled automatically, the dependent task waits (no time planned).
+    const normName = x => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
+    const openAll = await db(`tasks?owner_id=eq.${owner}&status=neq.Completed&select=id,task`);
+    const byName = {}; openAll.forEach(o => { byName[normName(o.task)] = o.id; byName[normName(o.id)] = o.id; });
+    const inPlan = new Set(items.map(x => x.id)), waiting = [];
+    items.forEach(x => {
+      x.after = String(x.t.dependencies || '').split(/[;,\n]/).map(normName).filter(Boolean).map(n => byName[n]).filter(id => id && id !== x.id);
+      if (x.t.start_now === 'do now') x.after = [];                     // Do now: you decided to start anyway
+      if (x.after.some(id => !inPlan.has(id))) { waiting.push(x.id); x.remaining = 0; }   // waits on a task that is not scheduled
+      x.after = x.after.filter(id => inPlan.has(id));
+    });
+    // blockers before the tasks that wait on them (otherwise the order stays: Do now, Do today, due date, priority)
+    const ordered = [], seenT = new Set(), visiting = new Set(), byIdItem = {}; items.forEach(x => { byIdItem[x.id] = x; });
+    const visit = x => { if (seenT.has(x.id) || visiting.has(x.id)) return; visiting.add(x.id);
+      x.after.forEach(id => { const b = byIdItem[id]; if (x.first) b.first = true; visit(b); });
+      visiting.delete(x.id); seenT.add(x.id); ordered.push(x); };
+    items.forEach(visit); items.splice(0, items.length, ...ordered);
     const existing = live.filter(b => !b.pinned && b.start >= now).map(b => ({ id: b.id, taskId: b.taskId, start: b.start, end: b.end }));
 
     // habits first: they reserve time near their ideal time, tasks are planned around them
@@ -451,7 +478,8 @@ async function schedule(owner, mode = 'incremental') {
     const status = { lastRun: new Date().toISOString(), mode, writes, atRisk: p.atRisk,
       unplaced: Object.fromEntries(Object.entries(p.unplaced).map(([k, v]) => [k, Math.round(v / MIN)])), next,
       doingNow: live.filter(b => b.now && b.start <= nowExact && b.end > nowExact).map(b => b.taskId),
-      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id), habitsSkipped: H.skipped,
+      overTime: [], replanned: items.filter(x => x.replanned).map(x => x.id), habitsSkipped: H.skipped, waiting,
+      extraDates: (s.extra || {}).dates || [],
       // tasks with time planned today (earlier today included), for the Home page
       todayDate: new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(today + 12 * HOUR)),
       todayTasks: (() => { const tEnd = addLocalDays(tz, today, 1), ids = new Set();
@@ -498,7 +526,7 @@ async function calendarData(owner, fromIso, toIso) {
     db(`bookings?owner_id=eq.${owner}&status=in.(Pending,Accepted)&end_at=gt.${enc(new Date(from).toISOString())}&start_at=lt.${enc(new Date(to).toISOString())}&select=*`)]);
   const iso = ms => new Date(ms).toISOString();
   const windows = [];
-  s.categories.forEach(c => windowsOf(c, from, to, s.tz).forEach(w => windows.push({ cat: c.name, color: c.color, start: iso(w[0]), end: iso(w[1]) })));
+  s.categories.forEach(c => windowsOf(c, from, to, s.tz, s.extra).forEach(w => windows.push({ cat: c.name, color: c.color, start: iso(w[0]), end: iso(w[1]) })));
   return {
     main: mainEv.filter(e => !(e.attendees || []).some(a => a.self && a.responseStatus === 'declined'))
       .map(e => ({ title: e.summary || '(busy)', start: e.start.dateTime || e.start.date, end: e.end.dateTime || e.end.date, allDay: !e.start.dateTime })),
@@ -568,6 +596,12 @@ function cleanSettings(cur, n) {
   if (n.minBlock) s.minBlock = Math.max(15, Math.min(240, Number(n.minBlock)));
   if (n.maxBlock) s.maxBlock = Math.max(s.minBlock, Math.min(480, Number(n.maxBlock)));
   if (n.horizonDays) s.horizonDays = Math.max(1, Math.min(14, Number(n.horizonDays)));
+  if (n.extra) {
+    const E = n.extra, cur = s.extra || {};
+    s.extra = { category: String(E.category || cur.category || 'Working'),
+      slots: Array.isArray(E.slots) ? E.slots.filter(r => time.test(r[0]) && time.test(r[1]) && r[0] < r[1]).slice(0, 6) : (cur.slots || []),
+      dates: Array.isArray(E.dates) ? [...new Set(E.dates.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort().slice(-20) : (cur.dates || []) };
+  }
   if (n.booking) {
     const B = n.booking;
     s.booking = { ...s.booking, enabled: !!B.enabled, category: String(B.category || s.booking.category),
@@ -611,6 +645,16 @@ Deno.serve(async req => {
       case 'moveBlock': return json({ ok: true, status: await moveBlock(owner, body.id, body.start, body.end, true) });
       case 'unpinBlock': return json({ ok: true, status: await moveBlock(owner, body.id, null, null, false) });
       case 'skipMissed': return json({ ok: true, ...(await skipMissed(owner, body.id)) });
+      case 'extraDay': {
+        const { s } = await loadSettings(owner), set = new Set((s.extra || {}).dates || []);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(body.date))) throw new Error('Bad date');
+        body.on ? set.add(body.date) : set.delete(body.date);
+        const today0 = new Intl.DateTimeFormat('en-CA', { timeZone: s.tz }).format(new Date());
+        const ns = cleanSettings(s, { extra: { dates: [...set].filter(d => d >= today0) } });
+        await saveSettingsData(owner, ns);
+        let status = null; try { status = await schedule(owner, 'full'); } catch (e) { status = { error: String(e.message || e) }; }
+        return json({ ok: true, extra: ns.extra, status });
+      }
       case 'settingsGet': { const { s, status } = await loadSettings(owner); return json({ ok: true, settings: s, status }); }
       case 'settingsSave': {
         const { s } = await loadSettings(owner); const ns = cleanSettings(s, body.settings || {});

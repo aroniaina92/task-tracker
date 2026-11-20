@@ -255,7 +255,8 @@ function card(t, opts = {}) {
       if (isAtRisk(t)) m.push('<span class="over">⚠ at risk</span>');
       if (notTodayMin(t)) m.push(`<span class="over">☀️ doesn't fit today · ${minText(notTodayMin(t))} moved later</span>`);
     }
-    if (blockers(t).length) m.push('<span class="wait">⛓ waiting on a task</span>');
+    if (blockers(t).length) m.push(`<span class="wait">⛓ waiting on a task${isAdmin() && (SST().waiting || []).includes(String(t.ID)) ? ' that is not scheduled' : ''}</span>`);
+    if (isAdmin() && isScheduled(t) && d10(t['Scheduled date']) > today()) m.push(`<span class="wait">⏸ starts ${niceDate(d10(t['Scheduled date']))}</span>`);
     if (t['Waiting on']) m.push(`<span class="wait">⏳ ${esc(t['Waiting on'])}</span>`);
   } else if (t['Completed on']) m.push(`<span>Done ${niceDate(t['Completed on'])}</span>`);
 
@@ -678,10 +679,26 @@ function viewCalendar() {
     <div class="sec-h"><h2>${esc(dayTitle(sel))} <span class="n">${open.length}</span></h2><button class="link" data-act="sync">↻ Re-plan</button></div>
     ${!cal ? '<div class="skel"></div>' : rows || habitRows || meetRows ? `<div class="card cklist">${meetRows}${rows}${habitRows}</div>` : '<div class="empty">Nothing planned this day.</div>'}
     <p class="note">${st.lastRun ? 'Last planned ' + esc(niceWhen(st.lastRun)) + ' · ' : ''}Times and reminders are in Google Calendar.</p>
+    ${extraHTML()}
     ${habitsHTML()}
     <div class="card share"><div><b>Booking link</b><small>People pick a free time in your working hours; you accept or decline.</small></div>
       <button class="btn small" data-act="copy-link">Copy link</button></div>`;
 }
+/* ---------- Extra work session (e.g. Saturday): Working-hours tasks may be planned on the days you switch on ---------- */
+function satOf(offsetWeeks) {                       // the Saturday of this week (today if Saturday), or a later week
+  const d = new Date(today() + 'T12:00:00'), add = (6 - d.getDay() + 7) % 7 + 7 * offsetWeeks;
+  d.setDate(d.getDate() + add); return ymdLocal(d);
+}
+function extraHTML() {
+  const E = (SCH() && SCH().extra) || {}, on = new Set(E.dates || []);
+  const hours = (E.slots || []).map(r => r[0] + '–' + r[1]).join(', ') || 'no hours set';
+  const row = (d, label) => `<label class="switch"><span>${label} · ${esc(new Date(d + 'T12:00:00').toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }))}
+      <small>${esc(hours)}</small></span><input type="checkbox" data-act="extra-day" data-v="${d}" ${on.has(d) ? 'checked' : ''}></label>`;
+  return `<div class="sec-h"><h2>Extra work session</h2><button class="link" data-view="sched">Hours ›</button></div>
+    <div class="card set-box">${row(satOf(0), 'This Saturday')}${row(satOf(1), 'Next Saturday')}
+      <p class="note" style="margin:6px 0 0">When switched on, tasks in ${esc(E.category || 'Working')} hours can also be planned on that day, in the usual order.</p></div>`;
+}
+
 /* ---------- Habits (owner): reserved time near an ideal time, shown as free to people who book ---------- */
 const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function habitDaysText(days) {
@@ -792,6 +809,10 @@ function viewSched() {
       <label class="set-day"><span class="wide">Shortest block</span>${sel('minBlock', [15, 30, 45, 60], s.minBlock, 'min')}</label>
       <label class="set-day"><span class="wide">Longest block</span>${sel('maxBlock', [60, 90, 120, 180, 240], s.maxBlock, 'min')}</label>
       <label class="set-day"><span class="wide">Plan ahead</span>${sel('horizonDays', [3, 5, 7, 10, 14], s.horizonDays, 'days')}</label></div>
+    <div class="sec-h"><h2>Extra work session</h2></div><div class="card set-box">
+      <label class="set-day"><span class="wide">Hours</span><input data-extra="slots" value="${esc(rangesText((s.extra || {}).slots))}" placeholder="08:30-12:30, 14:30-17:30"></label>
+      <label class="set-day"><span class="wide">Adds to</span><select data-extra="category">${catOpts((s.extra || {}).category || 'Working')}</select></label>
+      <p class="note">Switch the session on for a given Saturday on the Calendar page.</p></div>
     <div class="sec-h"><h2>Booking page</h2></div><div class="card set-box">
       <label class="switch"><span>Accept meeting requests</span><input type="checkbox" data-b="enabled" ${B.enabled ? 'checked' : ''}></label>
       <label class="set-day"><span class="wide">Bookable hours</span><select data-b="category">${catOpts(B.category)}</select></label>
@@ -817,6 +838,9 @@ function collectSettings() {
   document.querySelectorAll('[data-n]').forEach(x => { s[x.dataset.n] = Number(x.value); });
   document.querySelectorAll('[data-b]').forEach(x => { s.booking[x.dataset.b] = x.type === 'checkbox' ? x.checked : (/^(noticeHours|daysAhead)$/.test(x.dataset.b) ? Number(x.value) : x.value); });
   s.booking.durations = [...document.querySelectorAll('[data-dur]:checked')].map(x => Number(x.dataset.dur));
+  const ex = document.querySelector('[data-extra="slots"]');
+  if (ex) { const r = parseRanges(ex.value); r.bad.forEach(b => bad.push('Extra session ' + b));
+    s.extra = Object.assign({}, s.extra || {}, { slots: r.out, category: document.querySelector('[data-extra="category"]').value }); }
   return { s, bad };
 }
 async function saveSettings(btn) {
@@ -1065,7 +1089,7 @@ function openEditor(t, preset) {
     <div class="fs"><div class="lg">When</div>
       <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && isTrue(t.Today) ? 'checked' : ''}></label>
       <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${dueVal}">`)}
-      <label class="field"><span class="lab">Scheduled</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div>
+      <label class="field"><span class="lab">Start (not before)</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div>
       <label class="field"><span class="lab">🔁 Repeat</span><select name="Repeat">${REPEATS.map(([k, l]) => `<option value="${k}" ${(t && t.Repeat || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
         <small class="hint">When you tick it done, the next one is created automatically with the next due date.</small></label></div>
     <div class="fs"><div class="lg">Effort</div>
@@ -1310,6 +1334,17 @@ document.addEventListener('click', async e => {
     case 'fclear': Object.assign(S.f, { goal: '', cat: '', obj: '' }); render(); break;
     case 'refresh': refresh(true); break;
     case 'sync-now': flushQueue(); break;
+    case 'extra-day': {
+      const date = a.dataset.v, on = a.checked;
+      if (!navigator.onLine) { a.checked = !on; toast('This needs internet'); break; }
+      syncing(true, 'Re-planning…');
+      try {
+        const r = await api('extraDay', { date, on });
+        if (SCH()) SCH().extra = r.extra; calCache = {}; await refresh(false);
+        toast(on ? 'Extra session on · tasks re-planned' : 'Extra session off · tasks re-planned');
+      } catch (e) { a.checked = !on; toast('Not changed: ' + e.message); } finally { syncing(false); }
+      break;
+    }
     case 'missed': {
       if (!t) break;
       if (!navigator.onLine) { toast('This needs internet'); break; }
@@ -1418,7 +1453,8 @@ const Demo = (() => {
       { name: 'Personal', color: '#f2654f', slots: pers }, { name: 'Spafi', color: '#8e6cf0', slots: spafi }],
     goalMap: { '🌊 Research': 'Working', '📗 Manuscript': 'Working', '💼 Consulting': 'Working' }, catMap: {}, defaultCategory: 'Working',
     minBlock: 30, maxBlock: 120, horizonDays: 7, calendarId: 'demo',
-    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' } };
+    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' },
+    extra: { category: 'Working', slots: [['08:30', '12:30'], ['14:30', '17:30']], dates: [] } };
   const at = (n, hm) => { const x = new Date(); x.setDate(x.getDate() + n); const [h, m] = hm.split(':').map(Number); x.setHours(h, m, 0, 0); return x.getTime(); };
   const meetings = [{ title: 'Lab meeting', s: at(0, '10:00'), e: at(0, '11:00') }, { title: 'Call with MNP', s: at(1, '14:30'), e: at(1, '15:30') }];
   db.bookings = [{ id: 'b1', name: 'Hery R.', email: 'hery@example.org', minutes: 30, start: new Date(at(2, '09:00')).toISOString(), end: new Date(at(2, '09:30')).toISOString(), topic: 'Data sharing for the seagrass survey', status: 'Pending' }];
@@ -1457,7 +1493,7 @@ const Demo = (() => {
   }
   db.tasks.forEach(t => { if (t.Reclaim === 'YES') t['Auto schedule'] = 'YES'; });
   demoPlan();
-  const sched = () => ({ status: db.status, categories: db.settings.categories.map(c => ({ name: c.name, color: c.color })), goalMap: db.settings.goalMap,
+  const sched = () => ({ status: db.status, extra: db.settings.extra, categories: db.settings.categories.map(c => ({ name: c.name, color: c.color })), goalMap: db.settings.goalMap,
     catMap: db.settings.catMap, defaultCategory: 'Working', pendingBookings: db.bookings.filter(b => b.status === 'Pending').length, ready: true });
   db.habits = [{ ID: 'h1', Name: '🏃 Run', Minutes: 45, Days: [1, 3, 5], Ideal: '05:30', Flex: 60, Active: true }, { ID: 'h2', Name: '📖 Reading', Minutes: 30, Days: [0, 1, 2, 3, 4, 5, 6], Ideal: '20:30', Flex: 30, Active: true }];
   const out = () => ({ ok: true, data: JSON.parse(JSON.stringify({ tasks: db.tasks, goals: db.goals, categories: db.categories, objectives: db.objectives, ideas: db.ideas, habits: db.habits, sched: sched(), user: S.user, today: td })) });
@@ -1485,6 +1521,7 @@ const Demo = (() => {
       if (action === 'saveIdea') { let x = db.ideas.find(i => i.ID === p.idea.ID);
         if (!x) { x = { ID: 'i' + Date.now() }; db.ideas.push(x); } Object.assign(x, p.idea, { Updated: new Date().toISOString().slice(0, 19) }); return wait(out()); }
       if (action === 'deleteIdea') { db.ideas = db.ideas.filter(i => i.ID !== p.id); return wait(out()); }
+      if (action === 'extraDay') { const set = new Set(db.settings.extra.dates); p.on ? set.add(p.date) : set.delete(p.date); db.settings.extra.dates = [...set]; demoPlan(); return wait({ ok: true, extra: db.settings.extra }); }
       if (action === 'saveHabit') { const i = db.habits.findIndex(h => h.ID === p.habit.ID); if (i > -1) db.habits[i] = p.habit; else db.habits.push(p.habit); return wait(out()); }
       if (action === 'deleteHabit') { db.habits = db.habits.filter(h => h.ID !== p.id); return wait(out()); }
       if (action === 'resetMany') { const f = { objective: 'Objective', category: 'Category', goal: 'Main goal' }[p.kind]; let n = 0;

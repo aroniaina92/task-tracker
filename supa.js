@@ -69,7 +69,8 @@ function defaults() {
   return { categories: [{ name: 'Working', color: '#0a8f8a', slots: sl(wk, [['08:30', '12:30'], ['14:30', '17:30']]) },
     { name: 'Personal', color: '#f2654f', slots: personal }, { name: 'Spafi', color: '#8e6cf0', slots: spafi }],
     goalMap: {}, catMap: {}, defaultCategory: 'Working', minBlock: 30, maxBlock: 120, horizonDays: 7,
-    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' } };
+    booking: { enabled: true, category: 'Working', noticeHours: 24, daysAhead: 21, durations: [15, 30, 60], title: 'Meeting with Aroo', ownerName: 'Aroo' },
+    extra: { category: 'Working', slots: [['08:30', '12:30'], ['14:30', '17:30']], dates: [] } };
 }
 
 /* ---------- helpers ---------- */
@@ -122,7 +123,7 @@ async function data() {
   let sched = null;
   if (admin) {
     const row = st.data || {}, d = Object.assign(defaults(), row.data || {});
-    sched = { status: row.status || {}, categories: d.categories.map(x => ({ name: x.name, color: x.color })), goalMap: d.goalMap || {}, catMap: d.catMap || {},
+    sched = { status: row.status || {}, extra: Object.assign({ category: 'Working', slots: [], dates: [] }, d.extra || {}), categories: d.categories.map(x => ({ name: x.name, color: x.color })), goalMap: d.goalMap || {}, catMap: d.catMap || {},
       defaultCategory: d.defaultCategory, pendingBookings: bk.count || 0, ready: !!row.google_connected, connected: !!row.google_connected };
   }
   return {
@@ -188,7 +189,7 @@ async function call(action, p = {}) {
     }
     case 'bookingDecide': { const r = await fn('owner', { action, id: p.id, accept: !!p.accept, bookingUrl: p.bookingUrl || '' }); return Object.assign(r, { bookings: (await call('bookings')).bookings }); }
     case 'settingsGet': { const r = await fn('owner', { action }); return { ok: true, settings: r.settings, usage: r.status || {} }; }
-    case 'sync': case 'schedule': case 'calendar': case 'moveBlock': case 'unpinBlock': case 'settingsSave': case 'skipMissed':
+    case 'sync': case 'schedule': case 'calendar': case 'moveBlock': case 'unpinBlock': case 'settingsSave': case 'skipMissed': case 'extraDay':
       return fn('owner', Object.assign({}, p, { action: action === 'sync' ? 'schedule' : action }));
     case 'password': {
       if (!p.newPassword || p.newPassword.length < 8) throw new Error('The new password needs 8+ characters');
