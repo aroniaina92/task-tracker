@@ -123,3 +123,8 @@ In the app: **Me → Google Calendar → connect** (or the button on the Calenda
 1. **Database:** SQL Editor → New snippet → paste all of `supabase/update-2026-11-17.sql` → Run (safe to run again).
 2. **Server functions:** replace the code of **owner** and **booking** (Edge Functions → function → Code → Deploy). Keep "Verify JWT" off.
 3. **App:** unzip (the zip has no `config.js`, so yours is kept), commit, push. On the phone, close and reopen the app twice.
+
+### 23 Nov 2026 – daily plan with ☀️, no extra time for a task in progress
+1. **Database:** SQL Editor → New snippet → paste all of `supabase/update-2026-11-23.sql` → Run.
+2. **Server function:** replace the code of **owner** → Deploy (Verify JWT stays off).
+3. **App:** unzip (no `config.js` inside), commit, push; reopen the app twice.

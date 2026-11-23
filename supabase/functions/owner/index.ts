@@ -318,10 +318,12 @@ async function withLock(owner, fn) {
   }
   return { skipped: true };
 }
+let TODAY_LOCAL = '';                                   // set at the start of each run
+const todayMark = t => !!t.today && (!t.today_set || String(t.today_set) >= TODAY_LOCAL);
 function rank(t) {
   const pr = { High: 0, Medium: 1, Low: 2 }[t.priority];
   // order: Do now, then "Do today", then earliest due date (no due date last), then priority
-  return [t.start_now === 'do now' ? 0 : 1, t.today ? 0 : 1, t.due_date ? Date.parse(t.due_date) : 9e15, pr === undefined ? 3 : pr];
+  return [t.start_now === 'do now' ? 0 : 1, todayMark(t) ? 0 : 1, t.due_date ? Date.parse(t.due_date) : 9e15, pr === undefined ? 3 : pr];
 }
 const cmp = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
 const prop = (e, k) => ((e.extendedProperties || {}).private || {})[k];
@@ -346,6 +348,9 @@ async function schedule(owner, mode = 'incremental') {
     const nowExact = Date.now(), now = Math.ceil(nowExact / (5 * MIN)) * 5 * MIN;
     const today = dayStartUtc(tz, nowExact), horizonEnd = addLocalDays(tz, today, s.horizonDays + 1);
     let writes = 0;
+    TODAY_LOCAL = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(nowExact));
+    // ☀️ is for one day only: marks set on an earlier day are removed (each morning starts with suggestions)
+    try { await db(`tasks?owner_id=eq.${owner}&today=is.true&today_set=lt.${TODAY_LOCAL}`, { method: 'PATCH', body: { today: false }, prefer: 'return=minimal' }); } catch (_) { /* column missing until the 23 Nov update */ }
 
     const [mainEv, myEv, tasks, habits] = await Promise.all([
       listEvents(owner, 'primary', now - HOUR, horizonEnd),
@@ -407,15 +412,18 @@ async function schedule(owner, mode = 'incremental') {
       // Planned time passed but the task is not ticked done: plan its estimated time again.
       // (Time is counted per round of the estimate, so a round that is half done keeps only its rest.)
       const est = Math.round(Number(t.est_hours) * 60) * MIN, inRound = est > 0 ? Math.round(used / MIN) * MIN % est : 0;
-      const replanned = used > 0 && inRound === 0;
-      return { id: t.id, t, rank: rank(t), first: !!t.today || t.start_now === 'do now', remaining: est - inRound, replanned, dueEnd: due,
+      // a round is only "finished but not ticked" when all its planned time has ended (not while a block is running)
+      const stillRunning = live.some(b => b.taskId === t.id && !b.missed && b.end > now && (b.start < now || b.pinned));
+      const replanned = used > 0 && inRound === 0 && !stillRunning;
+      return { id: t.id, t, rank: rank(t), first: todayMark(t) || t.start_now === 'do now', remaining: used > 0 && inRound === 0 && stillRunning ? 0 : est - inRound, replanned, dueEnd: due,
         windows: windowsOf(catFor(s, t), now, horizonEnd, tz, s.extra), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN,
         notBefore: t.scheduled_date ? (p => localToUtc(tz, p[0], p[1], p[2], 0, 0))(t.scheduled_date.split('-').map(Number)) : 0 };
     }).sort((a, b) => cmp(a.rank, b.rank));
     // Dependencies ("waits on" another task, by name or ID): the task is planned after the tasks it waits on.
     // If such a task is open but not scheduled automatically, the dependent task waits (no time planned).
     const normName = x => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
-    const openAll = await db(`tasks?owner_id=eq.${owner}&status=neq.Completed&select=id,task`);
+    const openAll = await db(`tasks?owner_id=eq.${owner}&status=neq.Completed&select=id,task,today,today_set`);
+    const dayPlanned = openAll.some(todayMark);
     const byName = {}; openAll.forEach(o => { byName[normName(o.task)] = o.id; byName[normName(o.id)] = o.id; });
     const inPlan = new Set(items.map(x => x.id)), waiting = [];
     items.forEach(x => {
@@ -430,6 +438,8 @@ async function schedule(owner, mode = 'incremental') {
       x.after.forEach(id => { const b = byIdItem[id]; if (x.first) b.first = true; visit(b); });
       visiting.delete(x.id); seenT.add(x.id); ordered.push(x); };
     items.forEach(visit); items.splice(0, items.length, ...ordered);
+    // you have chosen today's tasks (☀️): the other tasks start tomorrow at the earliest
+    if (dayPlanned) { const tEnd0 = addLocalDays(tz, today, 1); items.forEach(x => { if (!x.first) x.notBefore = Math.max(x.notBefore || 0, tEnd0); }); }
     const existing = live.filter(b => !b.pinned && b.start >= now).map(b => ({ id: b.id, taskId: b.taskId, start: b.start, end: b.end }));
 
     // habits first: they reserve time near their ideal time, tasks are planned around them
@@ -488,11 +498,12 @@ async function schedule(owner, mode = 'incremental') {
         return [...ids]; })(),
       // open tasks whose planned time passed recently (today, yesterday): minutes, for the "↷ Didn't do it" button
       missable: (() => { const from = addLocalDays(tz, today, -1), out = {};
-        live.filter(b => open[b.taskId] && !b.done && !b.missed && b.start < now && b.start >= from)
+        live.filter(b => open[b.taskId] && !b.done && !b.missed && b.end <= now && b.start >= from)
           .forEach(b => { out[b.taskId] = (out[b.taskId] || 0) + Math.round((Math.min(b.end, now) - b.start) / MIN); });
         return out; })(),
       // "Do today" tasks that did not fit today: minutes planned after today (or not planned at all)
-      notToday: Object.fromEntries(items.filter(x => x.t.today).map(x => {
+      dayPlanned,
+      notToday: Object.fromEntries(items.filter(x => todayMark(x.t)).map(x => {
         const tEnd = addLocalDays(tz, today, 1);
         const later = (p.blocks[x.id] || []).filter(b => b[0] >= tEnd).reduce((a, b) => a + b[1] - b[0], 0) + (p.unplaced[x.id] || 0);
         return [x.id, Math.round(later / MIN)];
@@ -507,7 +518,7 @@ async function schedule(owner, mode = 'incremental') {
 async function skipMissed(owner, taskId) {
   const { s } = await loadSettings(owner), cal = await ensureCalendar(owner, s), nowExact = Date.now();
   const evs = (await listEvents(owner, cal, nowExact - 14 * DAY, nowExact + DAY))
-    .filter(e => prop(e, 'mysteps_task') === String(taskId) && e.start.dateTime && prop(e, 'mysteps_done') !== '1' && prop(e, 'mysteps_missed') !== '1' && evStart(e) < nowExact);
+    .filter(e => prop(e, 'mysteps_task') === String(taskId) && e.start.dateTime && prop(e, 'mysteps_done') !== '1' && prop(e, 'mysteps_missed') !== '1' && evEnd(e) <= nowExact);
   for (const e of evs) {
     const priv = { ...((e.extendedProperties || {}).private || {}), mysteps_missed: '1', mysteps_pin: '1', mysteps_now: '0' };
     const body = { summary: (e.summary || '').startsWith('↷ ') ? e.summary : '↷ ' + (e.summary || ''), extendedProperties: { private: priv } };

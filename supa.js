@@ -33,7 +33,7 @@ const s = v => v === null || v === undefined ? '' : v;
 const toTask = r => ({
   ID: r.id, 'Main goal': s(r.main_goal), Category: s(r.category), Objective: s(r.objective), Task: r.task, Priority: s(r.priority),
   Energy: s(r.energy), Context: s(r.context), 'Scheduled date': s(r.scheduled_date), 'Due date': s(r.due_date), 'Est hours': r.est_hours === null ? '' : Number(r.est_hours),
-  Status: r.status, Notes: s(r.notes), Dependencies: s(r.dependencies), 'Waiting on': s(r.waiting_on), Today: !!r.today,
+  Status: r.status, Notes: s(r.notes), Dependencies: s(r.dependencies), 'Waiting on': s(r.waiting_on), Today: !!r.today, 'Today set': s(r.today_set),
   'Completed on': localIso(r.completed_on), 'Start now': s(r.start_now), 'Auto schedule': r.auto_schedule ? 'YES' : '', 'Time category': s(r.time_category),
   Repeat: s(r.repeat)
 });

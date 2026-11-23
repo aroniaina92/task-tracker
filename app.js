@@ -125,7 +125,8 @@ const isDoNow = t => String(t['Start now'] || '').trim().toLowerCase() === 'do n
 const nextBlock = t => (SST().next || {})[t.ID] || null;
 const isAtRisk = t => (SST().atRisk || []).includes(String(t.ID));
 // ☀️ "Do today" task that could not fit in today's hours: minutes planned later
-const notTodayMin = t => (isTrue(t.Today) && !isDone(t) && (SST().notToday || {})[t.ID]) || 0;
+const sunToday = t => isTrue(t.Today) && (!t['Today set'] || d10(t['Today set']) >= today());
+const notTodayMin = t => (sunToday(t) && !isDone(t) && (SST().notToday || {})[t.ID]) || 0;
 // planned time that passed recently without the task being ticked (for "↷ Didn't do it")
 const missMin = t => (isAdmin() && !isDone(t) && (SST().missable || {})[t.ID]) || 0;
 const minText = m => m < 60 ? m + ' min' : (Math.round(m / 15) / 4) + ' h';
@@ -262,7 +263,7 @@ function card(t, opts = {}) {
 
   const side = [], acts = [];
   if (!isDone(t)) {
-    side.push(`<button class="ibtn sun ${isTrue(t.Today) ? 'on' : ''}" data-act="today" aria-label="Plan for today" title="Plan for today">☀️</button>`);
+    side.push(`<button class="ibtn sun ${sunToday(t) ? 'on' : ''}" data-act="today" aria-label="Plan for today" title="Plan for today">☀️</button>`);
     if (isAdmin()) {
       acts.push(`<button class="pill ${isScheduled(t) ? 'on' : ''}" data-act="sched" aria-pressed="${isScheduled(t)}">📅 ${isScheduled(t) ? 'Scheduled' : 'Schedule'}</button>`);
       acts.push(`<button class="pill now ${isDoNow(t) ? 'on' : ''}" data-act="donow" aria-pressed="${isDoNow(t)}">▶ ${isDoNow(t) ? 'Doing now' : 'Do now'}</button>`);
@@ -293,15 +294,16 @@ function todayBuckets() {
   // With automatic scheduling, a scheduled task belongs to today only if it has time planned today
   // (a task due today but planned for tomorrow is not counted). Otherwise: due or scheduled date today.
   const plan = isAdmin() && SCH() && SCH().ready, st = SST();
+  const dayPlanned = T.some(t => !isDone(t) && sunToday(t));
   const plannedToday = t => (st.todayDate === td && (st.todayTasks || []).includes(String(t.ID))) || (nextBlock(t) && localDay(nextBlock(t)) === td);
-  const planned = open.filter(t => isDoNow(t) || isTrue(t.Today) ||
+  const planned = open.filter(t => isDoNow(t) || sunToday(t) ||
     (plan && isScheduled(t) ? plannedToday(t) : (d10(t['Due date']) === td || d10(t['Scheduled date']) === td)));
   const ids = new Set(planned.map(t => t.ID));
   const overdue = sortTasks(open.filter(t => !ids.has(t.ID) && d10(t['Due date']) && d10(t['Due date']) < td));
   const progress = open.filter(t => !ids.has(t.ID) && !overdue.includes(t) && t.Status === 'In Progress');
   const doneToday = T.filter(t => isDone(t) && d10(t['Completed on']) === td);
   const sorted = sortTasks(planned, 'prio').sort((a, b) => (isDoNow(b) ? 1 : 0) - (isDoNow(a) ? 1 : 0));
-  return { planned: sorted, overdue, progress, doneToday };
+  return { planned: sorted, overdue, progress, doneToday, dayPlanned };
 }
 function streak() {
   const days = new Set(S.data.tasks.filter(isDone).map(t => d10(t['Completed on'])));
@@ -357,6 +359,9 @@ function viewHome() {
       <div class="week-note">Daily % = tasks done ÷ tasks planned or due that day</div></div>
 
     <div class="sec-h"><h2>Today <span class="n">${B.planned.length}</span></h2><button class="link" data-act="plan">Plan my day</button></div>
+    ${isAdmin() && SCH() && SCH().ready ? `<p class="psub" style="margin:-4px 0 10px">${B.dayPlanned
+      ? '☀️ Your plan for today. Other tasks start tomorrow.'
+      : 'Suggested for today. Tap ☀️ on the ones you will do; the rest moves to the next days.'}</p>` : ''}
     ${B.planned.length ? list(B.planned) : `<div class="empty">Nothing planned yet.<br><button class="btn primary" data-act="plan">Plan my day</button></div>`}
     ${B.overdue.length ? `<div class="sec-h danger"><h2>Overdue <span class="n">${B.overdue.length}</span></h2></div>${list(B.overdue)}` : ''}
     ${B.progress.length ? `<div class="sec-h"><h2>In progress <span class="n">${B.progress.length}</span></h2></div>${list(B.progress)}` : ''}
@@ -969,6 +974,7 @@ async function save(partial, msg) {
       if (partial.Status === 'Completed') { t.Today = false; t['Start now'] = ''; }
     }
     Object.assign(t, partial);
+    if ('Today' in partial) t['Today set'] = partial.Today ? today() : '';
   }, msg);
   if (!r) return;
   const after = S.data.tasks.find(x => x.ID === (partial.ID || '')) || partial;
@@ -1087,7 +1093,7 @@ function openEditor(t, preset) {
         ${t ? '' : '<div class="nprev" id="taskPrev"></div>'}</div>
 </div>
     <div class="fs"><div class="lg">When</div>
-      <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && isTrue(t.Today) ? 'checked' : ''}></label>
+      <label class="switch"><span>☀️ Do today</span><input type="checkbox" name="Today" ${t && sunToday(t) ? 'checked' : ''}></label>
       <div class="row2">${fieldReq('Due date', 'Due date', `<input type="date" name="Due date" value="${dueVal}">`)}
       <label class="field"><span class="lab">Start (not before)</span><input type="date" name="Scheduled date" value="${d10(t && t['Scheduled date'])}"></label></div>
       <label class="field"><span class="lab">🔁 Repeat</span><select name="Repeat">${REPEATS.map(([k, l]) => `<option value="${k}" ${(t && t.Repeat || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -1212,12 +1218,12 @@ function planBody() {
   const td = today(), open = S.data.tasks.filter(t => !isDone(t));
   if (!S.plan.cat) {
     const urgent = open.filter(t => d10(t['Due date']) && dayDiff(d10(t['Due date']), td) <= 2);
-    const urgentPlanned = urgent.filter(t => isTrue(t.Today)).length;
+    const urgentPlanned = urgent.filter(sunToday).length;
     let lastGoal = null, rows = '';
     catOrder().forEach(c => {
       const ts = open.filter(t => t.Category === c.name); if (!ts.length) return;
       if (c.goal !== lastGoal) { rows += `<div class="goal-lbl">${esc(c.goal || 'No goal')}</div>`; lastGoal = c.goal; }
-      const planned = ts.filter(t => isTrue(t.Today)).length;
+      const planned = ts.filter(sunToday).length;
       rows += `<button class="plan-cat" data-act="plan-cat" data-v="${esc(c.name)}" style="--h:${hue(c.goal)}"><span class="dot"></span>
         <span class="nm">${esc(c.name)}<small>${ts.length} open task${ts.length > 1 ? 's' : ''}</small></span>
         <span class="cnt">${planned ? `<b>☀️ ${planned}</b>` : ''}</span></button>`;
@@ -1229,7 +1235,7 @@ function planBody() {
   const isUrgent = S.plan.cat === '__urgent';
   const ts = sortTasks(open.filter(t => isUrgent ? (d10(t['Due date']) && dayDiff(d10(t['Due date']), td) <= 2) : t.Category === S.plan.cat), 'prio');
   const rows = ts.map(t => `<div class="plan-row" data-id="${esc(t.ID)}" style="--h:${hue(t['Main goal'])}">
-      <button class="ibtn sun ${isTrue(t.Today) ? 'on' : ''}" data-act="today" aria-label="Plan for today">☀️</button>
+      <button class="ibtn sun ${sunToday(t) ? 'on' : ''}" data-act="today" aria-label="Plan for today">☀️</button>
       <div class="tmain"><div class="ttitle">${esc(t.Task)}</div><div class="tmeta">
       ${isUrgent ? `<span class="cat"><i></i>${esc(t.Category || '')}</span>` : `<span>${esc(t.Objective || '')}</span>`}
       ${d10(t['Due date']) ? `<span class="${d10(t['Due date']) < td ? 'over' : ''}">Due ${niceDate(t['Due date'])}</span>` : ''}
@@ -1270,7 +1276,7 @@ document.addEventListener('click', async e => {
   switch (act) {
     case 'done': save({ ID: t.ID, Status: isDone(t) ? openStatus() : 'Completed' }, isDone(t) ? 'Back to open' : 'Done ✓'); break;
     case 'today':
-      save({ ID: t.ID, Today: !isTrue(t.Today) });
+      save({ ID: t.ID, Today: !sunToday(t) });
       if (a.closest('#sheet')) a.classList.toggle('on');
       break;
     case 'donow':
@@ -1466,7 +1472,7 @@ const Demo = (() => {
     db.blocks = keepPinned.slice(); const next = {}, atRisk = [], now = Date.now();
     const pr = { High: 0, Medium: 1, Low: 2 };
     db.tasks.filter(t => t['Auto schedule'] === 'YES' && t.Status !== 'Completed' && Number(t['Est hours']) > 0)
-      .sort((a, b) => (isTrue(b.Today) - isTrue(a.Today)) || String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')) || (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3))
+      .sort((a, b) => (!!b.Today - !!a.Today) || String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')) || (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3))
       .forEach(t => {
         const cat = db.settings.categories.find(c => c.name === (t['Time category'] || db.settings.goalMap[t['Main goal']] || 'Working')) || db.settings.categories[0];
         let need = Number(t['Est hours']) * 3600000 - keepPinned.filter(b => b.taskId === t.ID).reduce((a, b) => a + b.e - b.s, 0);
