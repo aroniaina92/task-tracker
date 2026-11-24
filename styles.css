@@ -487,3 +487,15 @@ details.advanced[open] summary{margin-bottom:10px}
 .ckrow.meet{border-left-color:var(--coral)}
 .ckrow.meet .ck-name small{display:block;font-weight:500;color:var(--muted);font-size:12px;margin-top:2px}
 .ckrow.meet .mt-acts{display:flex;gap:8px;margin-top:8px}
+
+/* several time categories per goal / category */
+.tc-row{align-items:flex-start}
+.tc-chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;flex:1}
+.tc{border:1px solid var(--line);background:transparent;border-radius:99px;padding:5px 11px;font:inherit;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer}
+.tc[aria-pressed="true"]{background:var(--c,var(--accent));border-color:var(--c,var(--accent));color:#fff}
+.tc-hint{width:100%;text-align:right;color:var(--muted);font-size:12px}
+.set-day.tc-row{display:block;padding:10px 0}
+.tc-row > .wide{display:block;margin-bottom:8px}
+.tc-row .tc-chips{justify-content:flex-start}
+.tc-row .tc-hint{text-align:left}
+.set-day.tc-row > span.tc-chips{width:auto;display:flex;flex-wrap:wrap;gap:8px;font-weight:600}

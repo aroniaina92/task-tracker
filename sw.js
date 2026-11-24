@@ -1,6 +1,6 @@
 // Service worker: makes the app installable and opens it instantly from cache.
 // Bump VERSION after each change you push, so phones pick up the new files.
-const VERSION = 'tt-v19';
+const VERSION = 'tt-v20';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'bg/reef.webp', 'bg/reef.jpg', 'icons/logo.png', 'icons/apple-touch-icon.png', 'icons/icon-maskable-512.png', 'book.html', 'book.js',
   'lib/supabase.min.js', 'supa.js'];

@@ -157,9 +157,21 @@ async function loadSettings(owner) {
   return { s, status: rows[0].status || {}, connected: rows[0].google_connected };
 }
 const saveSettingsData = (owner, s) => db(`settings?owner_id=eq.${owner}`, { method: 'PATCH', body: { data: s, updated_at: new Date().toISOString() } });
-function catFor(s, t) {
-  const name = t.time_category || s.catMap[t.category] || s.goalMap[t.main_goal] || s.defaultCategory;
-  return s.categories.find(c => c.name === name) || s.categories[0];
+// A goal or category can use several time categories (e.g. Working + Personal): the task may use all their hours.
+// Order: the task's own choice, then its category's, then its goal's, then the default.
+const asList = v => (Array.isArray(v) ? v : (v ? [v] : [])).map(String).filter(Boolean);
+function catsFor(s, t) {
+  const names = asList(t.time_category).length ? asList(t.time_category)
+    : asList((s.catMap || {})[t.category]).length ? asList(s.catMap[t.category])
+    : asList((s.goalMap || {})[t.main_goal]).length ? asList(s.goalMap[t.main_goal]) : asList(s.defaultCategory);
+  const cats = names.map(n => s.categories.find(c => c.name === n)).filter(Boolean);
+  return cats.length ? cats : [s.categories[0]];
+}
+const catFor = (s, t) => catsFor(s, t)[0];                    // first one: used for the colour
+function windowsOfAll(cats, fromMs, toMs, tz, extra) {        // all hours together, overlaps merged
+  const w = cats.flatMap(c => windowsOf(c, fromMs, toMs, tz, extra)).sort((a, b) => a[0] - b[0]), out = [];
+  w.forEach(x => { const l = out[out.length - 1]; if (l && x[0] <= l[1]) l[1] = Math.max(l[1], x[1]); else out.push([x[0], x[1]]); });
+  return out;
 }
 
 async function ensureCalendar(owner, s) {
@@ -416,7 +428,7 @@ async function schedule(owner, mode = 'incremental') {
       const stillRunning = live.some(b => b.taskId === t.id && !b.missed && b.end > now && (b.start < now || b.pinned));
       const replanned = used > 0 && inRound === 0 && !stillRunning;
       return { id: t.id, t, rank: rank(t), first: todayMark(t) || t.start_now === 'do now', remaining: used > 0 && inRound === 0 && stillRunning ? 0 : est - inRound, replanned, dueEnd: due,
-        windows: windowsOf(catFor(s, t), now, horizonEnd, tz, s.extra), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN,
+        windows: windowsOfAll(catsFor(s, t), now, horizonEnd, tz, s.extra), minBlock: s.minBlock * MIN, maxBlock: s.maxBlock * MIN,
         notBefore: t.scheduled_date ? (p => localToUtc(tz, p[0], p[1], p[2], 0, 0))(t.scheduled_date.split('-').map(Number)) : 0 };
     }).sort((a, b) => cmp(a.rank, b.rank));
     // Dependencies ("waits on" another task, by name or ID): the task is planned after the tasks it waits on.

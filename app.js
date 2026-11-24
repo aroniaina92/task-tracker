@@ -132,11 +132,16 @@ const missMin = t => (isAdmin() && !isDone(t) && (SST().missable || {})[t.ID]) |
 const minText = m => m < 60 ? m + ' min' : (Math.round(m / 15) / 4) + ' h';
 const isOverTime = t => (SST().overTime || []).includes(String(t.ID));
 // time category of a task: its own, else its category's, else its goal's, else the default
-function timeCat(t) {
-  const sc = SCH(); if (!sc) return null;
-  const name = t['Time category'] || (sc.catMap || {})[t.Category] || (sc.goalMap || {})[t['Main goal']] || sc.defaultCategory;
-  return sc.categories.find(c => c.name === name) || sc.categories[0] || null;
+const asList = v => (Array.isArray(v) ? v : (v ? [v] : [])).map(String).filter(Boolean);
+function timeCats(t) {                               // a goal / category may use several time categories
+  const sc = SCH(); if (!sc) return [];
+  const names = asList(t['Time category']).length ? asList(t['Time category'])
+    : asList((sc.catMap || {})[t.Category]).length ? asList(sc.catMap[t.Category])
+    : asList((sc.goalMap || {})[t['Main goal']]).length ? asList(sc.goalMap[t['Main goal']]) : asList(sc.defaultCategory);
+  const cats = names.map(n => sc.categories.find(c => c.name === n)).filter(Boolean);
+  return cats.length ? cats : (sc.categories[0] ? [sc.categories[0]] : []);
 }
+function timeCat(t) { return timeCats(t)[0] || null; }
 function niceWhen(iso) {
   if (!iso) return '';
   const d = new Date(iso), day = d.toISOString ? iso.slice(0, 10) : '', n = dayDiff(day, today());
@@ -801,14 +806,18 @@ function viewSched() {
         ${s.categories.length > 1 ? `<button class="ibtn" data-act="set-delcat" data-v="${i}" aria-label="Remove">✕</button>` : ''}</div>
       ${DAYS.map(([d, l]) => `<label class="set-day"><span>${l}</span><input data-day="${d}" value="${esc(rangesText(c.slots[d]))}" placeholder="off"></label>`).join('')}
     </div>`).join('');
-  const goals = S.data.goals.map(g => `<label class="set-day"><span class="wide">${esc(g.Name)}</span><select data-goal="${esc(g.Name)}">${catOpts(s.goalMap[g.Name] || s.defaultCategory)}</select></label>`).join('');
-  const catOver = catOrder().map(c => `<label class="set-day"><span class="wide">${esc(c.name)}</span><select data-catmap="${esc(c.name)}">${catOpts(s.catMap[c.name] || '', 'Same as goal')}</select></label>`).join('');
+  // one or several time categories per goal / category (tap to switch on or off)
+  const tcChips = (attr, name, chosen, hint) => `<div class="set-day tc-row"><span class="wide">${esc(name)}</span><span class="tc-chips" ${attr}="${esc(name)}">${
+    s.categories.map(c => `<button type="button" class="tc" data-act="tc-toggle" data-v="${esc(c.name)}" aria-pressed="${chosen.includes(c.name)}" style="--c:${esc(c.color)}">${esc(c.name)}</button>`).join('')}${
+    hint ? `<small class="tc-hint">${hint}</small>` : ''}</span></div>`;
+  const goals = S.data.goals.map(g => tcChips('data-goal', g.Name, asList(s.goalMap[g.Name]).length ? asList(s.goalMap[g.Name]) : asList(s.defaultCategory))).join('');
+  const catOver = catOrder().map(c => tcChips('data-catmap', c.name, asList(s.catMap[c.name]), asList(s.catMap[c.name]).length ? '' : 'same as goal')).join('');
   const B = s.booking, u = S.usage || {};
   const sel = (k, list, val, unit) => `<select data-n="${k}">${list.map(x => `<option value="${x}" ${Number(val) === x ? 'selected' : ''}>${x} ${unit}</option>`).join('')}</select>`;
   return `${pageTop('Scheduling')}
     <p class="psub">Hours for each time category. Write times like <b>08:30-12:30, 14:30-17:30</b> (8h30-12h30 works too). Leave a day empty for "off".</p>
     ${cats}<button class="btn block" data-act="set-addcat" style="margin-bottom:22px">+ Add a time category</button>
-    <div class="sec-h"><h2>Goals → time category</h2></div><div class="card set-box">${goals || '<p class="note">No goals yet.</p>'}</div>
+    <div class="sec-h"><h2>Goals → time categories</h2></div><div class="card set-box"><p class="note" style="margin-top:0">Choose one or more: a task can then be planned in any of those hours.</p>${goals || '<p class="note">No goals yet.</p>'}</div>
     <details class="card set-box" style="margin-top:10px"><summary class="set-sum">Per category (optional)</summary>${catOver}</details>
     <div class="sec-h"><h2>Blocks</h2></div><div class="card set-box">
       <label class="set-day"><span class="wide">Shortest block</span>${sel('minBlock', [15, 30, 45, 60], s.minBlock, 'min')}</label>
@@ -838,8 +847,9 @@ function collectSettings() {
     c.color = box.querySelector('[data-k="color"]').value;
     box.querySelectorAll('[data-day]').forEach(inp => { const r = parseRanges(inp.value); c.slots[inp.dataset.day] = r.out; r.bad.forEach(b => bad.push(c.name + ' ' + b)); });
   });
-  document.querySelectorAll('[data-goal]').forEach(x => { s.goalMap[x.dataset.goal] = x.value; });
-  s.catMap = {}; document.querySelectorAll('[data-catmap]').forEach(x => { if (x.value) s.catMap[x.dataset.catmap] = x.value; });
+  const picked = el => [...el.querySelectorAll('.tc[aria-pressed="true"]')].map(b => b.dataset.v);
+  document.querySelectorAll('[data-goal]').forEach(x => { const v = picked(x); s.goalMap[x.dataset.goal] = v.length ? v : asList(s.defaultCategory); });
+  s.catMap = {}; document.querySelectorAll('[data-catmap]').forEach(x => { const v = picked(x); if (v.length) s.catMap[x.dataset.catmap] = v; });
   document.querySelectorAll('[data-n]').forEach(x => { s[x.dataset.n] = Number(x.value); });
   document.querySelectorAll('[data-b]').forEach(x => { s.booking[x.dataset.b] = x.type === 'checkbox' ? x.checked : (/^(noticeHours|daysAhead)$/.test(x.dataset.b) ? Number(x.value) : x.value); });
   s.booking.durations = [...document.querySelectorAll('[data-dur]:checked')].map(x => Number(x.dataset.dur));
@@ -1105,7 +1115,7 @@ function openEditor(t, preset) {
       ${fieldReq('Energy (1 easy → 5 demanding)', 'Energy', seg('Energy', [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [5, '5']], S.form.Energy))}</div>
     ${isAdmin() && SCH() ? `<div class="fs"><div class="lg">Scheduling</div>
       <label class="switch"><span>📅 Schedule automatically<small>Gets time blocks in your "My Steps" calendar, by priority and due date</small></span><input type="checkbox" name="Auto schedule" ${t && isScheduled(t) ? 'checked' : ''}></label>
-      <label class="field"><span class="lab">Time category</span><select name="Time category"><option value="">Default (from goal${t && timeCat(t) && !t['Time category'] ? ': ' + esc(timeCat(t).name) : ''})</option>
+      <label class="field"><span class="lab">Time category</span><select name="Time category"><option value="">Default (from goal${t && timeCats(t).length && !t['Time category'] ? ': ' + esc(timeCats(t).map(c => c.name).join(' + ')) : ''})</option>
         ${SCH().categories.map(c => `<option ${t && t['Time category'] === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
       <label class="switch"><span>▶ Do now<small>Starts a block right now and moves the others later</small></span><input type="checkbox" name="Start now" ${t && isDoNow(t) ? 'checked' : ''}></label></div>` : ''}
     <div class="fs"><div class="lg">Details</div>
@@ -1340,6 +1350,12 @@ document.addEventListener('click', async e => {
     case 'fclear': Object.assign(S.f, { goal: '', cat: '', obj: '' }); render(); break;
     case 'refresh': refresh(true); break;
     case 'sync-now': flushQueue(); break;
+    case 'tc-toggle': {
+      const on = a.getAttribute('aria-pressed') !== 'true', box = a.closest('[data-goal]');
+      if (!on && box && box.querySelectorAll('.tc[aria-pressed="true"]').length === 1) { toast('A goal needs at least one time category'); break; }
+      a.setAttribute('aria-pressed', on); const h = a.parentElement.querySelector('.tc-hint');
+      if (h) h.style.display = a.parentElement.querySelector('.tc[aria-pressed="true"]') ? 'none' : ''; break;
+    }
     case 'extra-day': {
       const date = a.dataset.v, on = a.checked;
       if (!navigator.onLine) { a.checked = !on; toast('This needs internet'); break; }
@@ -1474,7 +1490,9 @@ const Demo = (() => {
     db.tasks.filter(t => t['Auto schedule'] === 'YES' && t.Status !== 'Completed' && Number(t['Est hours']) > 0)
       .sort((a, b) => (!!b.Today - !!a.Today) || String(a['Due date'] || '9').localeCompare(String(b['Due date'] || '9')) || (pr[a.Priority] ?? 3) - (pr[b.Priority] ?? 3))
       .forEach(t => {
-        const cat = db.settings.categories.find(c => c.name === (t['Time category'] || db.settings.goalMap[t['Main goal']] || 'Working')) || db.settings.categories[0];
+        const names = asList(t['Time category']).length ? asList(t['Time category']) : asList(db.settings.goalMap[t['Main goal']]).length ? asList(db.settings.goalMap[t['Main goal']]) : ['Working'];
+        const cat = { slots: {} }; names.forEach(n => { const c = db.settings.categories.find(x => x.name === n); if (c) Object.entries(c.slots).forEach(([d, r]) => { cat.slots[d] = (cat.slots[d] || []).concat(r); }); });
+        if (!Object.keys(cat.slots).length) cat.slots = db.settings.categories[0].slots;
         let need = Number(t['Est hours']) * 3600000 - keepPinned.filter(b => b.taskId === t.ID).reduce((a, b) => a + b.e - b.s, 0);
         if (String(t['Start now']).toLowerCase() === 'do now') { const s0 = Math.floor(now / 300000) * 300000, len = Math.min(need, 7200000);
           db.blocks.push({ id: 'n' + t.ID + s0, taskId: t.ID, title: t.Task, s: s0, e: s0 + len, pinned: true }); occ.push([s0, s0 + len]); need -= len; t['Start now'] = ''; next[t.ID] = new Date(s0).toISOString(); }
